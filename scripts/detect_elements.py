@@ -49,6 +49,7 @@ from app.features.ai.compliance_fsm import (
     BankDeskZones,
     ComplianceViolation,
     FrameDetections,
+    SessionType,
     VLMComplianceJudge,
     filter_reflection_and_assign_roles,
     should_trigger_id_verification,
@@ -221,6 +222,7 @@ class BankComplianceAuditor:
             "violations_total": len(all_violations),
             "violations": [v.to_dict() for v in all_violations],
             "vlm_id_check": vlm_id_verdict,
+            "session_mode": fsm.session_mode or SessionType.INTERNAL_OPERATION,
             "frame_logs": frame_logs,
         }
 
@@ -268,6 +270,13 @@ def print_legal_verdict(audit: dict[str, Any]) -> None:
     print(f"• Время анализа записи:             {audit['elapsed_sec']:.2f} сек.")
     print(f"• Проверено активных секунд:         {audit['total_frames_checked']}")
     print(f"• Зафиксировано нарушений НПА:       {audit['violations_total']}")
+    session_mode = audit.get("session_mode", SessionType.CUSTOMER_SESSION)
+    mode_label = (
+        "ВНУТРЕННИЙ ПЕРЕСЧЕТ / ИНКАССАЦИЯ (Клиент отсутствует штатно)"
+        if session_mode == SessionType.INTERNAL_OPERATION
+        else "ОБСЛУЖИВАНИЕ КЛИЕНТА (CUSTOMER_SESSION)"
+    )
+    print(f"• Операционный режим FSM:            {mode_label}")
 
     violations: list[dict[str, Any]] = audit["violations"]
     if violations:

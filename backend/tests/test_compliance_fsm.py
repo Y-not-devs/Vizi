@@ -4,6 +4,7 @@ from app.features.ai.compliance_fsm import (
     BankComplianceFSM,
     BankDeskZones,
     FrameDetections,
+    SessionType,
     VLMComplianceJudge,
     should_trigger_id_verification,
 )
@@ -82,10 +83,22 @@ def test_cashier_absent_violation() -> None:
 
 
 def test_counting_without_client_violation() -> None:
-    """Проверка п. 20: пересчет денег в отсутствие клиента."""
+    """Проверка п. 20: пересчет денег в отсутствие клиента в рамках CUSTOMER_SESSION."""
     fsm = BankComplianceFSM()
 
-    # Клиент ушел, но в лотке активность (0 сек)
+    # 1. Клиент подошел к стойке (началась клиентская сессия)
+    fsm.evaluate_frame(
+        FrameDetections(
+            timecode=1.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert fsm.session_mode == SessionType.CUSTOMER_SESSION
+
+    # 2. Клиент ушел во время операции, но в лотке активность (0 сек)
     v0 = fsm.evaluate_frame(
         FrameDetections(
             timecode=10.0,
@@ -97,7 +110,7 @@ def test_counting_without_client_violation() -> None:
     )
     assert len(v0) == 0
 
-    # Прошло 2.5 сек активности в лотке без клиента -> CRITICAL нарушение
+    # 3. Прошло 2.5 сек активности в лотке без клиента -> CRITICAL нарушение п. 20
     v1 = fsm.evaluate_frame(
         FrameDetections(
             timecode=12.5,
@@ -111,6 +124,27 @@ def test_counting_without_client_violation() -> None:
     assert v1[0].type == "COUNTING_WITHOUT_CLIENT"
     assert "Пункт 20" in v1[0].law
     assert v1[0].severity == "CRITICAL"
+
+
+def test_internal_operation_mode_suppression() -> None:
+    """Проверка режима INTERNAL_OPERATION: инкассация/ревизия без клиента не дает ложных алертов."""
+    fsm = BankComplianceFSM()
+
+    # Клиента нет с самого начала (t=0..15 сек), кассир пересчитывает ценности/инкассацию
+    for t in [1.0, 3.5, 7.0, 10.0, 15.0]:
+        violations = fsm.evaluate_frame(
+            FrameDetections(
+                timecode=t,
+                cashier_present=True,
+                customer_count=0,
+                tray_motion_score=6000.0,
+                detected_objects=[],
+            )
+        )
+        # В режиме инкассации п. 20 заблокирован
+        assert len(violations) == 0
+
+    assert fsm.session_mode == SessionType.INTERNAL_OPERATION
 
 
 def test_prohibited_items_violation() -> None:

@@ -261,31 +261,64 @@ def should_trigger_id_verification(
     return False
 
 
+class SessionType:
+    """Тип операционного режима работы кассы."""
+
+    CUSTOMER_SESSION = "CUSTOMER_SESSION"         # Обслуживание клиента
+    INTERNAL_OPERATION = "INTERNAL_OPERATION"     # Инкассация / Внутренний пересчет
+
+
 class BankComplianceFSM:
-    """Сценарный автомат (FSM) контроля нормативной базы Правил № 231."""
+    """Двухрежимный сценарный автомат (Dual-Mode FSM) Правил № 231 НБ РК.
+
+    Разделяет кассовый контекст на 2 ветви:
+    1. CUSTOMER_SESSION: Обслуживание клиента (прием/выдача наличности).
+       Нарушение п. 20 срабатывает, только если клиент реально был, но ушел до конца пересчета.
+    2. INTERNAL_OPERATION: Инкассация / Внутренняя ревизия / Сдача смены (клиента нет изначально).
+       Отсутствие клиента — норма. Проверяются только п. 12, п. 22 (оставление денег) и п. 14.
+    """
 
     def __init__(self) -> None:
+        self.session_mode: str | None = None
+        self.ever_seen_customer: bool = False
+        self.customer_first_seen_time: float | None = None
         self.client_left_time: float | None = None
         self.cashier_left_time: float | None = None
+        self.cashier_abandoned_time: float | None = None
         self.id_verified: bool = False
         self.first_exchange_contact_time: float | None = None
 
+    def update_session_mode(self, customer_present: bool, timecode: float) -> None:
+        """Классифицирует режим сессии по наличию клиента в кадре."""
+        if customer_present:
+            self.ever_seen_customer = True
+            if self.session_mode != SessionType.CUSTOMER_SESSION:
+                self.session_mode = SessionType.CUSTOMER_SESSION
+                if self.customer_first_seen_time is None:
+                    self.customer_first_seen_time = timecode
+
+        # Если прошло более 3 секунд, а клиента ни разу не было — это внутренняя работа / инкассация
+        if not self.ever_seen_customer and timecode >= 3.0 and self.session_mode is None:
+            self.session_mode = SessionType.INTERNAL_OPERATION
+
     def evaluate_frame(self, d: FrameDetections) -> list[ComplianceViolation]:
-        """Оценка кадра по нормативным статьям."""
+        """Оценка кадра по нормативным статьям с учетом контекста сессии."""
+        customer_present = d.customer_count > 0
+        self.update_session_mode(customer_present, d.timecode)
         violations: list[ComplianceViolation] = []
 
-        # 1. Постороннее лицо в зоне обслуживания (п. 14 Правил № 231)
-        if d.customer_count > 1:
+        # --- ОБЩИЕ ПРАВИЛА ДЛЯ ОБОИХ РЕЖИМОВ ---
+        # 1. Личные вещи / еда / напитки / телефон (п. 12 Правил № 231)
+        found_forbidden = FORBIDDEN_COCO_OBJECTS.intersection(set(d.detected_objects))
+        if found_forbidden:
+            items_str = ", ".join(sorted(found_forbidden))
             violations.append(
                 ComplianceViolation(
                     timecode=d.timecode,
-                    type="UNAUTHORIZED_ACCESS",
-                    law=LAW_UNAUTHORIZED_ACCESS,
-                    desc=(
-                        f"В зоне обслуживания зафиксировано {d.customer_count} посетителей "
-                        f"(допускается строго не более одного клиента)"
-                    ),
-                    severity="HIGH",
+                    type="PROHIBITED_ITEMS",
+                    law=LAW_PROHIBITED_ITEMS,
+                    desc=f"Обнаружены запрещенные предметы на кассовом столе: {items_str}",
+                    severity="CRITICAL" if "cell phone" in found_forbidden else "MEDIUM",
                 )
             )
 
@@ -309,39 +342,81 @@ class BankComplianceFSM:
         else:
             self.cashier_left_time = None
 
-        # 3. Пересчет денег в отсутствие клиента (п. 20 Правил № 231)
-        if d.customer_count == 0 and d.tray_motion_score > 3000.0:
-            if self.client_left_time is None:
-                self.client_left_time = d.timecode
-            elif d.timecode - self.client_left_time >= 2.0:
+        # ==============================================================
+        # ВЕТКА 1: ВНУТРЕННИЙ ПЕРЕСЧЕТ / ИНКАССАЦИЯ (БЕЗ КЛИЕНТА)
+        # ==============================================================
+        if self.session_mode == SessionType.INTERNAL_OPERATION:
+            # Алерты на "отсутствие клиента" ЗДЕСЬ ЗАБЛОКИРОВАНЫ — это штатный режим!
+            # 1. Посторонний вошел во время пересчета ценностей / инкассации (п. 14)
+            if customer_present and d.tray_motion_score > 2000.0:
                 violations.append(
                     ComplianceViolation(
                         timecode=d.timecode,
-                        type="COUNTING_WITHOUT_CLIENT",
-                        law=LAW_COUNTING_WITHOUT_CLIENT,
+                        type="UNAUTHORIZED_ACCESS",
+                        law=LAW_UNAUTHORIZED_ACCESS,
                         desc=(
-                            f"Зафиксирована активность в зоне пересчета наличности "
-                            f"(score: {d.tray_motion_score:.0f}) в отсутствие клиента"
+                            "Допуск постороннего лица в зону обслуживания во время "
+                            "внутреннего пересчета ценностей / инкассации"
                         ),
                         severity="CRITICAL",
                     )
                 )
-        else:
-            self.client_left_time = None
+            elif d.customer_count > 1:
+                violations.append(
+                    ComplianceViolation(
+                        timecode=d.timecode,
+                        type="UNAUTHORIZED_ACCESS",
+                        law=LAW_UNAUTHORIZED_ACCESS,
+                        desc=(
+                            f"В зоне обслуживания зафиксировано {d.customer_count} посетителей "
+                            f"(допускается строго не более одного клиента)"
+                        ),
+                        severity="HIGH",
+                    )
+                )
+            return violations
 
-        # 4. Личные вещи / еда / напитки / телефон (п. 12 Правил № 231)
-        found_forbidden = FORBIDDEN_COCO_OBJECTS.intersection(set(d.detected_objects))
-        if found_forbidden:
-            items_str = ", ".join(sorted(found_forbidden))
+        # ==============================================================
+        # ВЕТКА 2: ОБСЛУЖИВАНИЕ КЛИЕНТА (CUSTOMER_SESSION)
+        # ==============================================================
+        # 1. Постороннее лицо в зоне обслуживания (п. 14 Правил № 231)
+        if d.customer_count > 1:
             violations.append(
                 ComplianceViolation(
                     timecode=d.timecode,
-                    type="PROHIBITED_ITEMS",
-                    law=LAW_PROHIBITED_ITEMS,
-                    desc=f"Обнаружены запрещенные предметы на кассовом столе: {items_str}",
-                    severity="CRITICAL" if "cell phone" in found_forbidden else "MEDIUM",
+                    type="UNAUTHORIZED_ACCESS",
+                    law=LAW_UNAUTHORIZED_ACCESS,
+                    desc=(
+                        f"В зоне обслуживания зафиксировано {d.customer_count} посетителей "
+                        f"(допускается строго не более одного клиента)"
+                    ),
+                    severity="HIGH",
                 )
             )
+
+        # 2. Пересчет денег в отсутствие клиента (п. 20 Правил № 231)
+        # Срабатывает ТОЛЬКО если клиент реально был в сессии, но ушел до завершения пересчета
+        if self.ever_seen_customer and d.customer_count == 0 and d.cashier_present:
+            if d.tray_motion_score > 4000.0:
+                if self.client_left_time is None:
+                    self.client_left_time = d.timecode
+                elif d.timecode - self.client_left_time >= 2.0:
+                    violations.append(
+                        ComplianceViolation(
+                            timecode=d.timecode,
+                            type="COUNTING_WITHOUT_CLIENT",
+                            law=LAW_COUNTING_WITHOUT_CLIENT,
+                            desc=(
+                                "Клиент покинул кассовую кабину до завершения пересчета "
+                                f"внесенных денег (активность лотка: {d.tray_motion_score:.0f})"
+                            ),
+                            severity="CRITICAL",
+                        )
+                    )
+            else:
+                self.client_left_time = None
+        else:
+            self.client_left_time = None
 
         # Регистрация момента первого контакта с лотком (кандидат для VLM)
         # Блокируется, если нет пары 'кассир + клиент' (п. 19 пп. 1 Правил № 231)
@@ -349,7 +424,7 @@ class BankComplianceFSM:
             self.first_exchange_contact_time is None
             and should_trigger_id_verification(
                 cashier_present=d.cashier_present,
-                customer_present=(d.customer_count > 0),
+                customer_present=customer_present,
                 tray_motion_score=d.tray_motion_score,
                 id_already_verified=False,
             )

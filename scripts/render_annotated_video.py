@@ -47,6 +47,7 @@ from app.features.ai.compliance_fsm import (
     ComplianceViolation,
     FrameDetections,
     NormalizedZone,
+    SessionType,
     filter_reflection_and_assign_roles,
 )
 from app.features.ai.motion_extractor import BoundingBox, TemporalMotionAnalyzer
@@ -492,15 +493,27 @@ class VideoOverlayAnnotator:
                     current_badge_bg = COLOR_ALERT_BG
                     current_law = top_v.law
                 elif current_motion_score > 3000:
-                    current_fsm_state = "CASH_EXCHANGE"
-                    current_verdict = "🔍 ПЕРЕДАЧА / ПЕРЕСЧЕТ ДЕНЕГ"
-                    current_badge_bg = COLOR_CASH_BG
-                    current_law = "Пункт 18 (ID-контроль) / Пункт 20"
+                    if fsm.session_mode == SessionType.INTERNAL_OPERATION:
+                        current_fsm_state = "INTERNAL_OPERATION"
+                        current_verdict = "💼 ИНКАССАЦИЯ / ВНУТРЕННИЙ ПЕРЕСЧЕТ"
+                        current_badge_bg = COLOR_CASH_BG
+                        current_law = "п. 16 Правил № 14 / п. 22 Правил № 231"
+                    else:
+                        current_fsm_state = "CASH_EXCHANGE"
+                        current_verdict = "🔍 ПЕРЕДАЧА / ПЕРЕСЧЕТ ДЕНЕГ"
+                        current_badge_bg = COLOR_CASH_BG
+                        current_law = "Пункт 18 (ID-контроль) / Пункт 20"
                 else:
-                    current_fsm_state = "COMPLIANT"
-                    current_verdict = "✅ ПРАВИЛА СОБЛЮДЕНЫ"
-                    current_badge_bg = COLOR_PERSON
-                    current_law = "Постановление № 231 НБ РК"
+                    if fsm.session_mode == SessionType.INTERNAL_OPERATION:
+                        current_fsm_state = "INTERNAL_MODE"
+                        current_verdict = "💼 РЕВИЗИЯ / КЛИЕНТА НЕТ (НОРМА)"
+                        current_badge_bg = COLOR_PERSON
+                        current_law = "Постановление № 231 НБ РК"
+                    else:
+                        current_fsm_state = "COMPLIANT"
+                        current_verdict = "✅ ПРАВИЛА СОБЛЮДЕНЫ"
+                        current_badge_bg = COLOR_PERSON
+                        current_law = "Постановление № 231 НБ РК"
 
             # --- Отрисовка элементов на кадре ---
             draw_frame = frame.copy()
