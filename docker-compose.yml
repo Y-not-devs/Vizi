@@ -1,41 +1,54 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-ollama_data}:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  model-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["ollama", "pull", "${AI_MODEL:-qwen3.5:4b}"]
+    restart: "no"
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
       - ENVIRONMENT=prod
-      - APP_NAME=${APP_NAME:-Launchpad}
+      - APP_NAME=${APP_NAME:-Vizi}
       - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/app.db}
       - ENABLE_AUTH=${ENABLE_AUTH:-false}
       - ENABLE_UPLOADS=${ENABLE_UPLOADS:-false}
-      - ENABLE_AI=${ENABLE_AI:-false}
+      - ENABLE_AI=${ENABLE_AI:-true}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-change-me-please-32-bytes-min}
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-10}
-      - AI_BASE_URL=${AI_BASE_URL:-https://api.openai.com/v1}
-      - AI_API_KEY=${AI_API_KEY:-}
-      - AI_MODEL=${AI_MODEL:-gpt-4o-mini}
+      - UPLOAD_DIR=${UPLOAD_DIR:-./data/uploads}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-10080}
+      - AI_BASE_URL=http://ollama:11434/v1
+      - AI_API_KEY=${AI_API_KEY:-ollama}
+      - AI_MODEL=${AI_MODEL:-qwen3.5:4b}
+      - AI_TIMEOUT_SECONDS=${AI_TIMEOUT_SECONDS:-280}
+      - ANALYSIS_API_KEY=${ANALYSIS_API_KEY:?Set ANALYSIS_API_KEY in .env}
+      - ANALYSIS_TIMEOUT_SECONDS=${ANALYSIS_TIMEOUT_SECONDS:-280}
     volumes:
       - ./backend/data:/app/backend/data
     restart: unless-stopped
 
-  # Опциональный PostgreSQL для проектов, требующих реляционную СУБД:
-  # Чтобы включить: раскомментируйте блок ниже и укажите DATABASE_URL в .env:
-  # DATABASE_URL=postgresql+psycopg://app:app@db:5432/app
-  #
-  # db:
-  #   image: postgres:16-alpine
-  #   environment:
-  #     POSTGRES_USER: app
-  #     POSTGRES_PASSWORD: app
-  #     POSTGRES_DB: app
-  #   volumes:
-  #     - pgdata:/var/lib/postgresql/data
-  #   ports:
-  #     - "5432:5432"
-  #   restart: unless-stopped
-
-# volumes:
-#   pgdata:
+volumes:
+  ollama_data:

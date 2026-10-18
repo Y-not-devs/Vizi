@@ -1,8 +1,8 @@
 {
-  "name": "launchpad",
+  "name": "vizi",
   "version": "0.1.0",
   "private": true,
-  "description": "FastAPI + React fullstack starter for 1–2 day hackathons",
+  "description": "Local video analysis for cashier compliance",
   "engines": {
     "node": ">=20.19"
   },

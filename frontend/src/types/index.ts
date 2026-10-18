@@ -1,6 +1,5 @@
 /**
-/**
- * Типы данных системы ForteWatch согласно ТЗ Datathon 26
+ * Типы данных Vizi.
  */
 
 export interface EvidenceFrame {

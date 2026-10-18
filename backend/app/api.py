@@ -42,6 +42,9 @@ def build_api_router(settings: Settings) -> APIRouter:
 
     # --- Фичи проекта: добавляйте сюда ---
     api.include_router(items_router)
+    from app.features.analysis.router import router as analysis_router
+
+    api.include_router(analysis_router)
 
     # --- Опциональные модули (флаги в .env) ---
     if settings.enable_auth:

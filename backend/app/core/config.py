@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     )
 
     # --- Приложение ---
-    app_name: str = "Launchpad"
+    app_name: str = "Vizi"
     environment: Literal["dev", "prod", "test"] = "dev"
     api_prefix: str = "/api"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = "gpt-4o-mini"
     ai_timeout_seconds: float = 60
+
+    # --- Video analysis API ---
+    analysis_api_key: str = ""
+    analysis_dir: str = str(BACKEND_DIR / "data" / "analysis")
+    analysis_timeout_seconds: int = 280
 
     # --- Раздача собранного фронтенда (prod / Docker) ---
     frontend_dist: str = str(ROOT_DIR / "frontend" / "dist")

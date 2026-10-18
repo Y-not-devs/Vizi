@@ -643,6 +643,7 @@ class VLMComplianceJudge:
         base_url: str | None = None,
         model: str | None = None,
         timeout_sec: float = 60.0,
+        raise_on_error: bool = False,
     ) -> None:
         if get_settings is not None:
             settings = get_settings()
@@ -657,6 +658,7 @@ class VLMComplianceJudge:
         self.base_url = (base_url or default_base).rstrip("/")
         self.model = model or default_model
         self.timeout_sec = timeout_sec
+        self.raise_on_error = raise_on_error
 
     def verify_id_presentation(
         self,
@@ -665,7 +667,7 @@ class VLMComplianceJudge:
     ) -> dict[str, Any]:
         """Синхронный запрос к VLM с таймаутом."""
         # Если API-ключ для внешнего облачного сервиса не задан, работаем в offline/mock режиме
-        if not self.api_key and "api.openai.com" in self.base_url:
+        if not self.raise_on_error and not self.api_key and "api.openai.com" in self.base_url:
             return {
                 "id_presented": True,
                 "confidence": 0.88,
@@ -708,8 +710,13 @@ class VLMComplianceJudge:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                return json.loads(content)
+                result = json.loads(content)
+                if not isinstance(result.get("id_presented"), bool):
+                    raise ValueError("VLM response must contain a boolean id_presented")
+                return result
         except Exception as exc:
+            if self.raise_on_error:
+                raise RuntimeError("Local VLM analysis failed") from exc
             logger.info("VLM Judge fallback: %s", exc)
             return {
                 "id_presented": True,

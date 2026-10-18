@@ -1,337 +1,156 @@
-# Launchpad
+# Vizi
 
-> A production-ready, reusable fullstack template combining FastAPI and React 19 designed for rapid MVP delivery during 24–48 hour hackathons.
+Vizi анализирует видеозаписи кассовых операций и показывает события, требующие внимания: тип, таймкод, описание, правило и кадры-доказательства. Анализ выполняется локально с помощью YOLO, OpenCV, сценарного автомата и мультимодальной модели в Ollama.
 
-## Table of Contents
-- [TL;DR](#tldr)
-- [Architecture](#architecture)
-- [Repository Structure](#repository-structure)
-- [Quick Start](#quick-start)
-- [Reuse in Your Own Project](#reuse-in-your-own-project)
-- [Configuration Reference](#configuration-reference)
-- [Key Decisions and Limitations](#key-decisions-and-limitations)
+## Запуск
 
----
+Из корня проекта с настроенным `.env`:
 
-## TL;DR
+```powershell
+docker compose up --build -d
+```
 
-- **What was built:** A feature-modular fullstack monorepo featuring FastAPI, SQLAlchemy 2.0, Alembic, React 19, Vite, and custom token-based UI primitives.
-- **For whom:** Hackathon teams (3–4 developers) needing to launch functional MVPs with shared data contracts, working persistence, and zero environment setup overhead.
-- **Current status:** Complete and verified. All unit tests pass (5/5), database migrations and seed scripts are verified, production frontend builds cleanly, and single-container Docker packaging is configured.
+Нужны Docker Desktop с Linux containers и Docker Compose v2. При первом запуске Compose загружает модель Ollama, собирает приложение, применяет migrations и запускает FastAPI вместе с веб-интерфейсом.
 
----
+- Интерфейс: http://localhost:8000
+- Swagger: http://localhost:8000/api/docs
+- Проверка сервера: http://localhost:8000/api/health
 
-## Architecture
+В интерфейсе откройте настройки подключения, оставьте адрес `/api` и укажите значение `ANALYSIS_API_KEY` из своего `.env`. Затем загрузите видео и нажмите кнопку анализа. Интерфейс покажет статус обработки, итоговый результат и кадры событий.
+
+Порт приложения задаёт `API_PORT`. Node.js и Python на хосте для Docker-запуска не нужны.
+
+```powershell
+docker compose ps -a
+docker compose logs --tail 100 app model-init ollama
+docker compose down
+```
+
+## Настройка
+
+Для новой локальной копии:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Задайте собственный `ANALYSIS_API_KEY`. Секреты хранятся в локальном `.env`, который исключён из Git и Docker build context.
+
+| Переменная | Назначение |
+| --- | --- |
+| `APP_NAME` | Название приложения, `Vizi` |
+| `API_PORT` | Внешний порт Docker / порт локального backend, `8000` |
+| `WEB_PORT` | Vite dev server, `5173` |
+| `ANALYSIS_API_KEY` | Ключ для `X-API-Key` в API анализа и настройках интерфейса |
+| `ANALYSIS_TIMEOUT_SECONDS` | Максимальное время работы процесса анализа, `280` секунд |
+| `MAX_UPLOAD_MB` | Лимит загружаемого видео, `512` МБ в примере настроек |
+| `AI_MODEL` | Модель Ollama, `qwen3.5:4b` |
+| `AI_BASE_URL` | Локально `http://127.0.0.1:11434/v1`; Compose задаёт `http://ollama:11434/v1` |
+| `AI_API_KEY` | Для локальной Ollama — техническое значение `ollama` |
+| `AI_TIMEOUT_SECONDS` | Timeout одного обращения к модели, `280` секунд |
+| `OLLAMA_MODELS_DIR` | Необязательный путь к существующему каталогу `.ollama`; иначе используется Docker volume |
+| `DATABASE_URL` | По умолчанию `sqlite:///./data/app.db` |
+| `ENABLE_AI` | Дополнительный маршрут `/api/ai/chat` |
+| `ENABLE_AUTH`, `ENABLE_UPLOADS` | Дополнительные модули авторизации и файлового хранилища |
+| `SECRET_KEY` | Секрет подписи JWT при включённом auth |
+
+`ANALYSIS_API_KEY` защищает HTTP API приложения. Локальная Ollama использует отдельное соединение внутри Docker-сети. Ключи не помещаются в `VITE_*` и не включаются в сборку frontend.
+
+Видео, статусы задач и результаты сохраняются в `backend/data/analysis/`, SQLite — в `backend/data/`. Веса Ollama хранятся в `OLLAMA_MODELS_DIR` либо в именованном volume `ollama_data`. Обычный `docker compose down` сохраняет данные.
+
+## Архитектура
 
 ```mermaid
-graph TD
-    Client["Browser (React 19 + Vite SPA)"]
-    DevProxy["Vite Dev Server (:5173 /api proxy)"]
-    FastAPI["FastAPI Application (:8000)"]
-    Router["API Router (/api)"]
-    Items["Items Feature (CRUD)"]
-    Auth["Auth Feature (JWT / Bcrypt)"]
-    Uploads["Uploads Feature (Local Disk)"]
-    AI["AI Feature (OpenAI / Mock Client)"]
-    DB[(SQLite / PostgreSQL via SQLAlchemy)]
-    FS[Local File Storage: /data/uploads]
-    LLM[External LLM: OpenAI / Groq / Ollama]
-
-    Client -->|Development: proxy| DevProxy
-    DevProxy -->|Forward /api| FastAPI
-    Client -->|Production / Docker| FastAPI
-    FastAPI --> Router
-    Router --> Items
-    Router --> Auth
-    Router --> Uploads
-    Router --> AI
-    Items --> DB
-    Auth --> DB
-    Uploads --> FS
-    AI -->|HTTP API| LLM
+flowchart TD
+    UI["Vue 3 / TypeScript / Tailwind"] -->|"Загрузка + X-API-Key"| API["FastAPI /api/v1"]
+    API --> Jobs["Статусы и результаты задач на диске"]
+    API --> Process["Отдельный процесс анализа"]
+    Process --> Motion["OpenCV: активные кадры и ROI"]
+    Motion --> YOLO["YOLOv8n: люди и предметы"]
+    YOLO --> FSM["Compliance FSM"]
+    FSM --> VLM["Ollama: qwen3.5:4b"]
+    Process --> Evidence["Таймкоды, правила и JPEG-кадры"]
+    Evidence --> Jobs
+    Jobs -->|"Опрос статуса"| UI
 ```
 
-### Component Overview
+- **Frontend:** Vue 3, TypeScript, Vite 6, Tailwind CSS, Lucide.
+- **Backend:** FastAPI, Pydantic, SQLAlchemy 2, Alembic.
+- **Анализ:** OpenCV, Ultralytics YOLOv8n, адаптивная топология кассовой зоны, FSM и локальная VLM.
+- **Docker:** `ollama` обслуживает модель, `model-init` загружает веса, `app` раздаёт UI и API на одном порту.
 
-| Component | Responsibility | Tech | Location in repo |
-| :--- | :--- | :--- | :--- |
-| **API Server** | HTTP routing, CORS, exception mapping, SPA serving | FastAPI, Uvicorn, Pydantic v2 | `backend/app/main.py`, `backend/app/api.py` |
-| **Core Infrastructure** | Settings management, DB session lifecycle, domain error classes | Pydantic-Settings, SQLAlchemy 2.0 | `backend/app/core/` |
-| **Database Migrations** | Schema versioning and batch-safe DDL generation | Alembic | `backend/migrations/`, `backend/alembic.ini` |
-| **Feature: Items** | Reference CRUD domain implementation | SQLAlchemy, Pydantic | `backend/app/features/items/` |
-| **Feature: Auth** | User registration, login, password hashing, JWT validation | PyJWT, Bcrypt | `backend/app/features/auth/` |
-| **Feature: Uploads** | Multipart file validation and local disk persistence | FastAPI UploadFile | `backend/app/features/uploads/` |
-| **Feature: AI** | OpenAI-compatible chat completion client with mock fallback | HTTPX | `backend/app/features/ai/` |
-| **Frontend SPA** | Client UI, layout navigation, interactive dashboard | React 19, TypeScript, Vite | `frontend/src/` |
-| **UI Design System** | Tokenized CSS variables and headless-style UI primitives | CSS Tokens, Lucide-React | `frontend/src/styles/`, `frontend/src/components/ui/` |
-| **Deployment Engine** | Unified multi-stage container build | Docker, Docker Compose | `Dockerfile`, `docker-compose.yml` |
+Анализ выполняется последовательно в отдельных процессах. Сервер принимает загрузку, возвращает идентификатор задачи и предоставляет результат для опроса. Лимит времени контролируется сервером. Завершённые результаты доступны после перезапуска.
 
----
+## API
 
-## Repository Structure
+Все маршруты анализа принимают заголовок `X-API-Key`.
+
+### Загрузка видео
+
+`POST /api/v1/analyze` — `multipart/form-data`, поле `file`.
+
+Поддерживаются MP4, MOV, AVI, MKV, WebM и M4V. Сервер проверяет размер и возможность декодирования видео. Ответ `202 Accepted`:
+
+```json
+{
+  "job_id": "899d31b5eea24ac3b0b6bdc9e7b81351",
+  "status": "queued",
+  "filename": "cashier.mp4",
+  "total_duration_sec": 30.0
+}
+```
+
+### Статус и результат
+
+`GET /api/v1/jobs/{job_id}`
+
+Статусы: `queued` → `processing` → `done` / `failed`. Готовый результат содержит `verdict` (`violation` или `no_violation`), `violations`, время обработки и число проверенных сегментов. Каждое событие включает `type`, `timecode_sec`, `description`, `rule` и `evidence_frames` с JPEG в base64. При статусе `failed` поле `error` содержит сообщение.
+
+Пример запроса из PowerShell (ключ вводится в текущей сессии):
+
+```powershell
+$apiKey = Read-Host 'ANALYSIS_API_KEY'
+curl.exe -X POST http://localhost:8000/api/v1/analyze -H "X-API-Key: $apiKey" -F "file=@C:/Videos/cashier.mp4"
+curl.exe http://localhost:8000/api/v1/jobs/JOB_ID -H "X-API-Key: $apiKey"
+```
+
+API также доступен через Swagger с кнопкой Authorize.
+
+## Структура
 
 ```text
-launchpad/
-├── .env.example              # Central configuration template for backend, frontend, and Docker.
-├── .gitignore                # Rules ignoring virtualenvs, SQLite DBs, uploads, and build outputs.
-├── Dockerfile                # Multi-stage container recipe building frontend and running FastAPI.
-├── docker-compose.yml        # Orchestration running the unified container and optional PostgreSQL.
-├── package.json              # Root script runner orchestrating backend, frontend, and database tasks.
-├── scripts/                  # Standalone Node.js automation scripts.
-│   ├── dev.mjs               # Concurrent development runner executing backend and frontend with unified logging.
-│   ├── lib.mjs               # Cross-platform subprocess execution, env parsing, and terminal coloring helpers.
-│   ├── py.mjs                # Wrapper executing commands inside the active Python environment.
-│   └── setup.mjs             # Zero-config initial setup automating env creation, venvs, DB, and npm deps.
-├── backend/                  # Python backend application root.
-│   ├── alembic.ini           # Alembic migration runner configuration.
-│   ├── pyproject.toml        # Backend dependencies and tool configurations (ruff, pytest).
-│   ├── migrations/           # Alembic database migration revisions and environment harness.
-│   │   ├── env.py            # Migration runtime wiring models dynamically to target metadata.
-│   │   └── versions/         # Autogenerated version migration files.
-│   ├── app/                  # Application code package.
-│   │   ├── main.py           # FastAPI factory, middleware configuration, and static SPA mounting.
-│   │   ├── api.py            # Central router registry with dynamic feature flag toggles.
-│   │   ├── seed.py           # Idempotent demo data generator for instant UI validation.
-│   │   ├── core/             # Framework-level modules (config, db, errors, schemas).
-│   │   └── features/         # Feature-sliced application modules.
-│   │       ├── items/        # Baseline CRUD module (models, schemas, service, router).
-│   │       ├── auth/         # Optional authentication module (JWT, bcrypt).
-│   │       ├── uploads/      # Optional file storage module with MIME sniffing.
-│   │       └── ai/           # Optional LLM integration module with mock response mode.
-│   └── tests/                # Automated pytest test suites with in-memory SQLite fixtures.
-└── frontend/                 # Client SPA application root.
-    ├── index.html            # HTML entry point with system fonts and responsive viewport.
-    ├── package.json          # Frontend dependencies (React 19, Lucide, Vite).
-    ├── tsconfig.json         # Strict TypeScript compiler configuration with path alias mappings.
-    ├── vite.config.ts        # Vite build and development configuration with /api reverse proxy.
-    ├── public/               # Public assets, icons, and SVG favicon.
-    └── src/                  # Client source code.
-        ├── main.tsx          # React application root mounting context providers and global styles.
-        ├── App.tsx           # Top-level view switcher and state host.
-        ├── types/            # TypeScript interfaces matching backend Pydantic models.
-        ├── styles/           # Global stylesheets and token variables (tokens.css, global.css).
-        ├── lib/              # Shared client utilities: typed HTTP client, hooks, date/byte formatters.
-        ├── context/          # Shared React contexts (backend health check and runtime meta).
-        ├── components/       # Component library split into ui/ primitives and layout/ shell.
-        └── features/         # Feature-specific components and UI pages (items, ai, uploads, auth).
+backend/
+  app/features/analysis/   # HTTP API, хранение задач и процесс анализа
+  app/features/ai/         # Общий анализатор, motion extraction, FSM, VLM
+  app/models/             # Веса YOLOv8n
+  app/core/               # Settings, база данных, обработка ошибок
+  migrations/             # Alembic
+  tests/                  # API, анализ видео, motion extraction, FSM
+frontend/src/             # Интерфейс, API client, просмотр результатов
+scripts/                  # Команды разработки и CLI-обработка видео
+Dockerfile                # Frontend build + Python runtime
+docker-compose.yml        # App + Ollama + загрузка модели
 ```
 
----
+## Разработка
 
-## Quick Start
+Нужны Node.js 20.19+ и Python 3.11+. Из корня:
 
-### Prerequisites
-- Node.js 20+
-- Python 3.11+
-- Git
-
-### 1. Initialize Project
-Clone or copy the repository, then run the automated initialization script:
-
-```bash
+```powershell
 npm run setup
-```
-This command automatically:
-- Copies `.env.example` to `.env` if `.env` does not exist.
-- Creates `backend/.venv` (or uses `uv` if installed) and installs all backend dependencies in editable mode.
-- Applies all pending database migrations via Alembic.
-- Populates the database with initial demo data.
-- Installs all frontend npm dependencies.
-
-### 2. Start Development Servers
-Run the concurrent dev command from the root directory:
-
-```bash
 npm run dev
 ```
 
-Endpoints available immediately:
-- **Web Interface:** [http://localhost:5173](http://localhost:5173)
-- **Interactive API Docs (Swagger):** [http://localhost:8000/api/docs](http://localhost:8000/api/docs)
-- **Health Endpoint:** [http://localhost:8000/api/health](http://localhost:8000/api/health)
+Vite: `http://localhost:5173`; FastAPI: `http://localhost:8000`. Vite проксирует `/api` в backend. Для локального анализа запустите Ollama и загрузите модель из `AI_MODEL`.
 
-### 3. Run Verification Tests
-```bash
+```powershell
+npm run lint
 npm run test
+npm run build
 ```
 
----
+CLI использует тот же анализатор, что и HTTP API:
 
-## Reuse in Your Own Project
-
-Use this checklist and snippet guide to scaffold a new hackathon project using this template.
-
-### Adaptation Checklist
-1. Copy the entire repository directory or use it as a template repository on GitHub.
-2. Update the project identifiers:
-   - In `.env`: set `APP_NAME` to your hackathon project name.
-   - In `backend/pyproject.toml` and `package.json`: adjust the project name field.
-3. Choose database persistence:
-   - For SQLite: leave `DATABASE_URL` untouched (default: `sqlite:///./data/app.db`).
-   - For PostgreSQL: set `DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DB_NAME`.
-4. Enable or disable modules in `.env`:
-   - `ENABLE_AUTH=true` if user logins are required.
-   - `ENABLE_UPLOADS=true` if file attachments or images are required.
-   - `ENABLE_AI=true` if using LLMs (set `AI_API_KEY`).
-5. What can be safely deleted:
-   - If you do not need the sample CRUD: delete `backend/app/features/items/`, remove its router registration from `backend/app/api.py`, delete `frontend/src/features/items/`, and remove the initial Alembic migration in `backend/migrations/versions/`.
-
----
-
-### Reusable Snippets
-
-#### 1. Define a Backend Domain Model
-Create `backend/app/features/<feature_name>/models.py`:
-
-```python
-from sqlalchemy import String, Text
-from sqlalchemy.orm import Mapped, mapped_column
-from app.core.db import Base, TimestampMixin
-
-class Entity(TimestampMixin, Base):
-    __tablename__ = "entities"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), index=True)
-    details: Mapped[str] = mapped_column(Text, default="")
+```powershell
+python scripts/detect_elements.py C:/Videos/cashier.mp4 --no-video
 ```
-
-#### 2. Define Request and Response Schemas
-Create `backend/app/features/<feature_name>/schemas.py`:
-
-```python
-from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field
-
-class EntityCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    details: str = ""
-
-class EntityRead(EntityCreate):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    created_at: datetime
-    updated_at: datetime
-```
-
-#### 3. Define Domain Business Logic
-Create `backend/app/features/<feature_name>/service.py`:
-
-```python
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-from app.core.errors import NotFoundError
-from .models import Entity
-from .schemas import EntityCreate
-
-def list_entities(db: Session) -> list[Entity]:
-    return list(db.scalars(select(Entity).order_by(Entity.id.desc())).all())
-
-def create_entity(db: Session, data: EntityCreate) -> Entity:
-    record = Entity(**data.model_dump())
-    db.add(record)
-    db.commit()
-    db.refresh(record)
-    return record
-```
-
-#### 4. Define API Endpoints
-Create `backend/app/features/<feature_name>/router.py`:
-
-```python
-from fastapi import APIRouter, status
-from app.core.db import DbSession
-from . import service
-from .schemas import EntityCreate, EntityRead
-
-router = APIRouter(prefix="/entities", tags=["entities"])
-
-@router.get("", response_model=list[EntityRead])
-def list_all(db: DbSession):
-    return service.list_entities(db)
-
-@router.post("", response_model=EntityRead, status_code=status.HTTP_201_CREATED)
-def create_one(data: EntityCreate, db: DbSession):
-    return service.create_entity(db, data)
-```
-
-#### 5. Register Feature Router
-In `backend/app/api.py`, include the router:
-
-```python
-from app.features.entities.router import router as entities_router
-
-api.include_router(entities_router)
-```
-
-#### 6. Apply Database Migration
-Execute migration generation and upgrade from the repository root:
-
-```bash
-npm run db:revision -- "add_entities"
-npm run db:migrate
-```
-
-#### 7. Call API from Frontend Component
-In `frontend/src/features/<feature_name>/api.ts`:
-
-```typescript
-import { api } from '@/lib/api'
-
-export interface Entity {
-  id: number
-  name: string
-  details: string
-  created_at: string
-}
-
-export const entitiesApi = {
-  list: () => api.get<Entity[]>('/entities'),
-  create: (data: { name: string; details?: string }) => api.post<Entity>('/entities', data),
-}
-```
-
----
-
-## Configuration Reference
-
-All settings are resolved from the root `.env` file via `pydantic-settings` on the backend and Vite build configurations on the frontend.
-
-| Variable Name | Required | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `APP_NAME` | No | `Launchpad` | Public title displayed in the API documentation, health endpoint, and frontend sidebar. |
-| `ENVIRONMENT` | No | `dev` | Application runtime environment (`dev`, `prod`, `test`). |
-| `API_PORT` | No | `8000` | Port on which the FastAPI Uvicorn server listens. |
-| `WEB_PORT` | No | `5173` | Port on which the Vite frontend development server runs. |
-| `CORS_ORIGINS` | No | `http://localhost:5173,http://127.0.0.1:5173` | Comma-delimited list of permitted CORS origins. |
-| `DATABASE_URL` | No | `sqlite:///./data/app.db` | SQLAlchemy connection string. Set to PostgreSQL URI if using Postgres. |
-| `ENABLE_AUTH` | No | `false` | Feature flag exposing `/api/auth/*` routes and JWT handling when set to `true`. |
-| `SECRET_KEY` | Conditional | `dev-secret-change-me...` | 32+ character HMAC key for signing JWT tokens. Required if `ENABLE_AUTH=true`. |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `10080` (7 days) | Validity lifetime of issued user authentication tokens. |
-| `ENABLE_UPLOADS` | No | `false` | Feature flag exposing `/api/uploads` and local static media hosting. |
-| `UPLOAD_DIR` | No | `./data/uploads` | Local directory for storing user uploads. |
-| `MAX_UPLOAD_MB` | No | `10` | Maximum single-file upload size allowed before raising 400 Bad Request. |
-| `ENABLE_AI` | No | `false` | Feature flag enabling `/api/ai/*` chat completion routes. |
-| `AI_BASE_URL` | No | `https://api.openai.com/v1` | Target OpenAI-compatible API base URL (Groq, OpenRouter, Together, or Ollama). |
-| `AI_API_KEY` | Conditional | `""` | API bearer token for LLM provider. When left blank, returns mock responses for zero-token frontend testing. |
-| `AI_MODEL` | No | `gpt-4o-mini` | Name of model requested from the target provider. |
-| `VITE_API_URL` | No | `/api` (proxy default) | Target backend API root path. Override only if the API is hosted on a distinct remote host. |
-
----
-
-## Key Decisions and Limitations
-
-### Decisions Made
-
-- **Feature-sliced isolation:** Every feature module (`items`, `auth`, `uploads`, `ai`) bundles its own ORM models, Pydantic schemas, service layer, and router. Multiple team members can work on separate features concurrently with minimal Git conflicts.
-- **Auto-discovery of ORM models:** `backend/app/core/db.py` uses `pkgutil` to discover all feature `models.py` files. Adding a table requires no manual registration in `Base.metadata`.
-- **Lightweight data fetching on frontend:** Replaced heavy query managers with native typed `fetch` wrappers and concise `useQuery` / `useMutation` hooks (`frontend/src/lib/hooks.ts`). This avoids complex state stores and keeps bundle size small.
-- **Zero-runtime-CSS design tokens:** Defined design tokens directly in `frontend/src/styles/tokens.css` with a pre-built UI library (`Button`, `Card`, `Modal`, `Input`, `Badge`, `Toast`). This eliminates setup friction from utility CSS tools while preserving dark mode styling.
-- **Integrated SPA hosting for production:** In production mode or inside the Docker container, FastAPI automatically serves the built Vite assets from `frontend/dist` with client-side routing fallback. A single container deployment hosts both API and UI.
-
-### Limitations and Next Steps
-
-- **Database migration resets during active hackathons:** If rapid prototyping leads to conflicting Alembic revisions across branches, run `npm run db:reset` to rebuild the schema from scratch.
-- **Single-node file storage:** The `uploads` module persists files directly to local disk. For multi-node cloud deployments, replace `save_upload` in `backend/app/features/uploads/service.py` with an S3 client.
-- **WebSocket support:** The AI chat completion endpoint currently uses synchronous HTTP responses. Streaming (`StreamingResponse` with server-sent events) can be layered into `backend/app/features/ai/router.py` if token-by-token streaming is required.

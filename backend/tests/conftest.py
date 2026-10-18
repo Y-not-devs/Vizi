@@ -24,7 +24,11 @@ from app.main import create_app  # noqa: E402
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "analysis_dir", str(tmp_path / "analysis"))
+    monkeypatch.setattr(get_settings(), "analysis_api_key", "test-analysis-key")
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )

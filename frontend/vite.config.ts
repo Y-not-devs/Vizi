@@ -4,7 +4,7 @@ import { defineConfig, loadEnv } from 'vite'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '..', '')
-  const apiTarget = `http://127.0.0.1:${env.API_PORT || 8040}`
+  const apiTarget = `http://127.0.0.1:${env.API_PORT || 8000}`
 
   return {
     envDir: '..',
@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },
     server: {
-      port: Number(env.WEB_PORT || 8000),
+      port: Number(env.WEB_PORT || 5173),
       host: '0.0.0.0',
       proxy: {
         '/api': {

@@ -1,6 +1,5 @@
 /**
- * HTTP-клиент взаимодействия с бэкендом ForteWatch (порт 8040)
- * Согласно ТЗ Datathon 26: POST /api/v1/analyze и GET /api/v1/jobs/{job_id}
+ * HTTP-клиент Vizi: загрузка видео и получение результатов анализа.
  */
 
 import type { AnalysisResponse, BackendMeta, JobStatus, Violation } from '@/types'
@@ -22,7 +21,7 @@ export const apiConfig = {
   getApiKey(): string {
     const custom = localStorage.getItem(STORAGE_API_KEY)
     if (custom && custom.trim()) return custom.trim()
-    return (import.meta.env.VITE_API_KEY as string | undefined) ?? 'fortewatch-secret-key-2026'
+    return ''
   },
   setApiKey(key: string | null) {
     if (key) localStorage.setItem(STORAGE_API_KEY, key)
@@ -42,7 +41,7 @@ export class ApiError extends Error {
 }
 
 /**
- * Проверка доступности бэкенда на порте 8040
+ * Проверка доступности бэкенда
  */
 export async function checkBackendHealth(): Promise<{ online: boolean; message: string; meta?: BackendMeta }> {
   const base = apiConfig.getBaseUrl()
@@ -74,7 +73,7 @@ export async function checkBackendHealth(): Promise<{ online: boolean; message: 
 
     return {
       online: false,
-      message: res ? `Бэкенд вернул код ${res.status}` : 'Нет ответа от бэкенда (порт 8040)',
+      message: res ? `Бэкенд вернул код ${res.status}` : 'Нет ответа от бэкенда',
     }
   } catch (err: any) {
     return {
@@ -183,6 +182,9 @@ export async function uploadVideoForAnalysis(
   const apiKey = apiConfig.getApiKey()
 
   const formData = new FormData()
+  if (!apiKey) {
+    throw new ApiError('Укажите API-ключ в настройках подключения.', 401)
+  }
   formData.append('file', file)
 
   // Пути для запроса с фоллбеком
@@ -304,7 +306,7 @@ export async function fetchJobStatus(jobId: string): Promise<AnalysisResponse> {
 }
 
 /**
- * 3. Полный цикл опроса до завершения задачи (максимум 5 минут по регламенту ТЗ)
+ * 3. Опрос статуса до завершения задачи
  */
 export async function pollJobUntilComplete(
   jobId: string,
@@ -318,7 +320,7 @@ export async function pollJobUntilComplete(
     const elapsedSec = (Date.now() - startTime) / 1000
 
     if (elapsedSec > maxWaitSec) {
-      throw new ApiError('Превышено время ожидания обработки (5 минут по регламенту ТЗ Datathon 26)', 408)
+      throw new ApiError('Превышено время ожидания обработки (5 минут)', 408)
     }
 
     const result = await fetchJobStatus(jobId)
