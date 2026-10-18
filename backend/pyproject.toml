@@ -11,6 +11,8 @@ dependencies = [
     "psycopg[binary]>=3.2.0",     # драйвер Postgres (для SQLite ничего не нужно)
     "pyjwt>=2.10.0",              # модуль auth
     "bcrypt>=4.2.0",              # модуль auth
+    "numpy>=2.0.0",               # обработка массивов и медианное окно
+    "opencv-python-headless>=4.10.0", # компьютерное зрение ForteWatch
 ]
 
 [project.optional-dependencies]
