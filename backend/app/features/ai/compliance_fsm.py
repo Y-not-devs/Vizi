@@ -60,13 +60,14 @@ class NormalizedZone:
 class BankDeskZones:
     """Конфигурация зон кассового узла с фильтрацией отражений (Anti-Reflection)."""
 
-    # 1. Зона кассира (кресло и внутренняя часть стола кассы)
+    # 1. Зона кассира: Equipment Anchor Framework
+    # (от купюросчетной машины слева x=0.20 до сейфа/тумбы справа x=0.68)
     cashier_zone: NormalizedZone = field(
-        default_factory=lambda: NormalizedZone("Cashier Zone", 0.22, 0.35, 0.54, 0.95)
+        default_factory=lambda: NormalizedZone("Cashier Zone", 0.20, 0.22, 0.68, 0.88)
     )
-    # 2. Зона клиента: Решение 2 (сужена до пространства строго перед кассовой стойкой)
+    # 2. Зона клиента: внешнее пространство перед стойкой / за перегородкой справа
     customer_zone: NormalizedZone = field(
-        default_factory=lambda: NormalizedZone("Customer Zone", 0.55, 0.15, 0.98, 0.95)
+        default_factory=lambda: NormalizedZone("Customer Zone", 0.68, 0.15, 0.98, 0.95)
     )
     # 3. Зона лотка / пересчета наличности (между кассиром и клиентом)
     exchange_zone: NormalizedZone = field(
@@ -75,7 +76,7 @@ class BankDeskZones:
     # 4. Решение 1: Маска исключения стеклянной двери (Exclusion Mask)
     glass_door_exclusion: NormalizedZone = field(
         default_factory=lambda: NormalizedZone(
-            "Glass Door Exclusion", 0.00, 0.08, 0.38, 0.52
+            "Glass Door Exclusion", 0.00, 0.08, 0.30, 0.52
         )
     )
     # 5. Решение 3: Минимальный относительный рост реального посетителя
@@ -85,7 +86,7 @@ class BankDeskZones:
         """Проверяет, является ли детекция отражением в стеклянной двери."""
         if self.glass_door_exclusion.contains_point(cx, cy):
             return True
-        if cx < 0.38 and cy < 0.52 and box_h_ratio < self.min_customer_height_ratio:
+        if cx < 0.30 and cy < 0.52 and box_h_ratio < self.min_customer_height_ratio:
             return True
         return False
 
@@ -97,6 +98,7 @@ class BankDeskZones:
             return False
         return self.customer_zone.contains_point(cx, cy)
 
+
 @dataclass(slots=True)
 class PersonDetection:
     """Результат геометрической классификации роли человека."""
@@ -107,6 +109,7 @@ class PersonDetection:
     area: float
     cx: float
     cy: float
+    bottom_y: float = 0.0
 
 
 def filter_reflection_and_assign_roles(
@@ -115,10 +118,12 @@ def filter_reflection_and_assign_roles(
 ) -> list[PersonDetection]:
     """Разделяет людей на Кассира, Клиента и Игнорируемые Отражения.
 
-    Реализует геометрический спектрально-размерный фильтр (Depth & IoU Heuristic):
-    1. Отражение в левой стеклянной двери: cx < 0.28, cy < 0.48 и мелкая площадь (area < 0.022).
-    2. Кассир: на переднем плане в зоне стола (0.25 <= cx <= 0.65, cy >= 0.35, area >= 0.020).
-    3. Клиент: реальный посетитель с достаточным геометрическим весом (area >= 0.020).
+    Реализует Equipment Anchor Framework (якоря оборудования) и Depth/IoU фильтрацию:
+    1. Отражение в стекле двери: cx < 0.28, bottom_y < 0.60 или малая площадь (area < 0.022).
+    2. Кассир в служебном секторе оборудования:
+       - По горизонтали: между счетчиком банкнот слева (0.20) и сейфом/тумбой справа (0.68).
+       - По вертикали: за столом кабины (bottom_y <= 0.88), достаточный вес (area >= 0.020).
+    3. Клиент: с внешней стороны стойки / перед перегородкой (cx > 0.68 или bottom_y > 0.88).
     """
     h_img, w_img = frame_shape[:2]
     assigned_persons: list[PersonDetection] = []
@@ -132,9 +137,10 @@ def filter_reflection_and_assign_roles(
         box_w = (x2 - x1) / float(w_img)
         box_h = (y2 - y1) / float(h_img)
         area = box_w * box_h
+        bottom_y = float(y2) / float(h_img)
 
-        # 1. Отражение в стекле двери (мелкий силуэт в левом проеме)
-        if cx < 0.28 and cy < 0.48 and area < 0.022:
+        # 1. Отражение в стекле двери (слева в проеме)
+        if cx < 0.28 and (bottom_y < 0.60 or area < 0.022):
             assigned_persons.append(
                 PersonDetection(
                     role="REFLECTION",
@@ -143,12 +149,13 @@ def filter_reflection_and_assign_roles(
                     area=area,
                     cx=cx,
                     cy=cy,
+                    bottom_y=bottom_y,
                 )
             )
             continue
 
-        # 2. Кассир (всегда в центре/на переднем плане за столом кассы)
-        if 0.25 <= cx <= 0.65 and cy >= 0.35 and area >= 0.020:
+        # 2. Кассир (внутри сектора оборудования от счетной машинки до сейфа за столом)
+        if 0.20 <= cx <= 0.68 and bottom_y <= 0.88 and area >= 0.020:
             assigned_persons.append(
                 PersonDetection(
                     role="CASHIER",
@@ -157,12 +164,13 @@ def filter_reflection_and_assign_roles(
                     area=area,
                     cx=cx,
                     cy=cy,
+                    bottom_y=bottom_y,
                 )
             )
             continue
 
-        # 3. Клиент (реальный посетитель в зоне обслуживания)
-        if area >= 0.020:
+        # 3. Клиент (с внешней стороны зоны обслуживания)
+        if (cx > 0.65 or bottom_y > 0.88) and area >= 0.020:
             assigned_persons.append(
                 PersonDetection(
                     role="CUSTOMER",
@@ -171,6 +179,7 @@ def filter_reflection_and_assign_roles(
                     area=area,
                     cx=cx,
                     cy=cy,
+                    bottom_y=bottom_y,
                 )
             )
             continue
@@ -184,6 +193,7 @@ def filter_reflection_and_assign_roles(
                 area=area,
                 cx=cx,
                 cy=cy,
+                bottom_y=bottom_y,
             )
         )
 

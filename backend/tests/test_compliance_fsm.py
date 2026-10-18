@@ -131,16 +131,17 @@ def test_prohibited_items_violation() -> None:
 
 
 def test_zone_definitions() -> None:
-    """Проверка работы полигонов зон кассового узла."""
+    """Проверка работы полигонов зон кассового узла (Equipment Anchor Framework)."""
     zones = BankDeskZones()
 
-    # Центр кассы (кассир)
+    # Центр кассы и сектор наклона к сейфу (0.20 <= cx <= 0.68)
     assert zones.cashier_zone.contains_point(0.50, 0.60)
     assert not zones.customer_zone.contains_point(0.50, 0.60)
+    assert zones.cashier_zone.contains_point(0.62, 0.65)  # Наклон к сейфу справа
 
-    # Клиентская сторона перед стойкой
-    assert zones.customer_zone.contains_point(0.60, 0.40)
-    assert not zones.cashier_zone.contains_point(0.60, 0.40)
+    # Клиентская сторона перед стойкой / за перегородкой справа (cx >= 0.68)
+    assert zones.customer_zone.contains_point(0.75, 0.40)
+    assert not zones.cashier_zone.contains_point(0.75, 0.40)
 
 
 def test_anti_reflection_solutions() -> None:
@@ -156,9 +157,9 @@ def test_anti_reflection_solutions() -> None:
     assert not zones.is_valid_customer(0.25, 0.25, box_h_ratio=0.15)
 
     # 3. Решение 2 (Суженная клиентская зона): реальный посетитель перед кассовым окном
-    # Высота достаточная (0.45), координаты перед лотком (0.65, 0.45)
-    assert not zones.is_glass_reflection(0.65, 0.45, box_h_ratio=0.45)
-    assert zones.is_valid_customer(0.65, 0.45, box_h_ratio=0.45)
+    # Высота достаточная (0.45), координаты перед лотком/справа (0.75, 0.45)
+    assert not zones.is_glass_reflection(0.75, 0.45, box_h_ratio=0.45)
+    assert zones.is_valid_customer(0.75, 0.45, box_h_ratio=0.45)
 
 
 def test_vlm_judge_fallback() -> None:
