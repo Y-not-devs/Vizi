@@ -6,6 +6,7 @@ from app.features.ai.compliance_fsm import (
     COLOR_PENDING,
     COLOR_REFLECTION,
     COLOR_VIOLATION,
+    LAW_NO_DOC_CONFIRMATION,
     LAW_UNAUTHORIZED_ACCESS_ROOM,
     AdaptiveCashierTopology,
     BankComplianceFSM,
@@ -602,6 +603,154 @@ def test_safe_deposit_and_session_closing() -> None:
     assert len(v_new_client) == 0
     assert fsm.session_mode == SessionType.CUSTOMER_SESSION
     assert fsm.transaction_active is True
+
+
+def test_adjusting_deposit_and_no_doc_confirmation() -> None:
+    """Проверка п. 19 пп. 6) и п. 20 Правил № 231 (Пересчет -> Возврат части клиенту).
+
+    1. Когда это норма:
+       Машина пересчитала деньги, часть возвращена (сдача / брак / излишек).
+       Обе стороны на месте, кассир вносит данные в ПК -> session_state='ADJUSTING_DEPOSIT',
+       никаких алертов не создается.
+    2. Когда это нарушение:
+       Клиент забрал возвращенные купюры и ушел до получения подтверждающего чека/ордера
+       -> триггер ERR_NO_DOC_CONFIRMATION.
+    3. Когда чек выдан штатно:
+       После выдачи чека уход клиента не создает нарушения.
+    """
+    # Сценарий 1: Норма (ADJUSTING_DEPOSIT)
+    fsm1 = BankComplianceFSM()
+    # 1.1 Клиент подошел
+    fsm1.evaluate_frame(
+        FrameDetections(
+            timecode=1.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert fsm1.session_state == "TRANSACTION_IN_PROGRESS"
+
+    # 1.2 Машинка пересчитала деньги
+    fsm1.evaluate_frame(
+        FrameDetections(
+            timecode=5.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=100.0,
+            is_machine_counting=True,
+            detected_objects=[],
+        )
+    )
+    assert fsm1.machine_counted_in_session is True
+
+    # 1.3 Кассир вернула часть купюр (брак/сдача), клиент сидит на месте, идет оформление
+    v_norm = fsm1.evaluate_frame(
+        FrameDetections(
+            timecode=8.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=3500.0,
+            returned_part_to_client=True,
+            detected_objects=[],
+        )
+    )
+    assert len(v_norm) == 0
+    assert fsm1.returned_part_to_client is True
+    assert fsm1.session_state == "ADJUSTING_DEPOSIT"
+
+    # 1.4 Оба сидят на месте еще несколько секунд (кассир вносит данные в ПК)
+    v_cont = fsm1.evaluate_frame(
+        FrameDetections(
+            timecode=11.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v_cont) == 0
+    assert fsm1.session_state == "ADJUSTING_DEPOSIT"
+
+    # Сценарий 2: Нарушение (ERR_NO_DOC_CONFIRMATION)
+    # Клиент встает и уходит без чека/документа
+    v_err = fsm1.evaluate_frame(
+        FrameDetections(
+            timecode=14.0,
+            cashier_present=True,
+            customer_count=0,
+            tray_motion_score=0.0,
+            receipt_issued=False,
+            detected_objects=[],
+        )
+    )
+    assert len(v_err) == 1
+    assert v_err[0].type == "ERR_NO_DOC_CONFIRMATION"
+    assert v_err[0].law == LAW_NO_DOC_CONFIRMATION
+    assert "п. 19 пп. 6)" in v_err[0].law
+    assert "п. 20" in v_err[0].law
+    assert v_err[0].severity == "CRITICAL"
+
+    # Сценарий 3: Штатное завершение с выдачей чека (receipt_issued)
+    fsm3 = BankComplianceFSM()
+    fsm3.evaluate_frame(
+        FrameDetections(
+            timecode=1.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    fsm3.evaluate_frame(
+        FrameDetections(
+            timecode=4.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            is_machine_counting=True,
+            detected_objects=[],
+        )
+    )
+    fsm3.evaluate_frame(
+        FrameDetections(
+            timecode=6.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=4000.0,
+            returned_part_to_client=True,
+            detected_objects=[],
+        )
+    )
+    assert fsm3.session_state == "ADJUSTING_DEPOSIT"
+
+    # Кассир выдает квитанцию/чек
+    fsm3.evaluate_frame(
+        FrameDetections(
+            timecode=8.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=1500.0,
+            receipt_issued=True,
+            detected_objects=[],
+        )
+    )
+    assert fsm3.receipt_issued is True
+
+    # Клиент забирает чек и уходит - нарушения ERR_NO_DOC_CONFIRMATION нет
+    v_ok = fsm3.evaluate_frame(
+        FrameDetections(
+            timecode=10.0,
+            cashier_present=True,
+            customer_count=0,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    err_violations = [v for v in v_ok if v.type == "ERR_NO_DOC_CONFIRMATION"]
+    assert len(err_violations) == 0
+
 
 
 

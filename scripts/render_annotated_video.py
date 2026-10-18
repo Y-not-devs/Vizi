@@ -544,6 +544,11 @@ class VideoOverlayAnnotator:
                         current_verdict = "💼 ИНКАССАЦИЯ / ВНУТРЕННИЙ ПЕРЕСЧЕТ"
                         current_badge_bg = COLOR_CASH_BG
                         current_law = "п. 16 Правил № 14 / п. 22 Правил № 231"
+                    elif fsm.id_verified:
+                        current_fsm_state = "TRANSACTION_IN_PROGRESS"
+                        current_verdict = "🤝 ВЗАИМОРАСЧЕТ / СДАЧА (НОРМА)"
+                        current_badge_bg = COLOR_CASH_BG
+                        current_law = "п. 19, 20 Правил № 231 (Взаиморасчет)"
                     else:
                         current_fsm_state = "CASH_EXCHANGE"
                         current_verdict = "🔍 ПЕРЕДАЧА / ПЕРЕСЧЕТ ДЕНЕГ"

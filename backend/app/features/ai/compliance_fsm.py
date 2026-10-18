@@ -44,6 +44,7 @@ LAW_CASHIER_ABSENT: Final[str] = "Пункт 22 Правил № 231 НБ РК"
 LAW_COUNTING_WITHOUT_CLIENT: Final[str] = "Пункт 20 Правил № 231 НБ РК"
 LAW_PROHIBITED_ITEMS: Final[str] = "Пункт 12 Правил № 231 НБ РК"
 LAW_ID_CHECK: Final[str] = "Пункт 18 Правил № 231 НБ РК"
+LAW_NO_DOC_CONFIRMATION: Final[str] = "п. 19 пп. 6), п. 20 Правил № 231 НБ РК"
 
 # Запрещенные личные вещи на кассовом узле (COCO классы)
 FORBIDDEN_COCO_OBJECTS: Final[set[str]] = {
@@ -272,6 +273,8 @@ class FrameDetections:
     visitor_in_room_count: int = 0     # количество посторонних в служебной зоне кассы
     is_machine_counting: bool = False  # активность купюросчетной машинки
     safe_deposit_completed: bool = False  # деньги убраны в сейф/тумбу (п. 19/20)
+    receipt_issued: bool = False       # выдан чек/ордер клиенту (п. 19 пп. 6)
+    returned_part_to_client: bool = False  # факт возврата части купюр клиенту (п. 20)
     full_frame_b64: str | None = None
     crop_b64: str | None = None
 
@@ -343,11 +346,15 @@ class BankComplianceFSM:
 
     def __init__(self) -> None:
         self.session_mode: str | None = None
+        self.session_state: str = "IDLE"  # IDLE, TRANSACTION_IN_PROGRESS, ADJUSTING_DEPOSIT
         self.transaction_active: bool = False
         self.ever_seen_customer: bool = False
         self.client_was_present: bool = False
         self.has_had_customer_session: bool = False
         self.safe_deposit_completed: bool = False
+        self.machine_counted_in_session: bool = False
+        self.returned_part_to_client: bool = False
+        self.receipt_issued: bool = False
         self.customer_first_seen_time: float | None = None
         self.client_left_time: float | None = None
         self.client_left_timestamp: float | None = None
@@ -368,10 +375,14 @@ class BankComplianceFSM:
         """
         self.transaction_active = False
         self.session_mode = None
+        self.session_state = "IDLE"
         self.client_was_present = False
         self.ever_seen_customer = False
         self.id_verified = False
         self.safe_deposit_completed = False
+        self.machine_counted_in_session = False
+        self.returned_part_to_client = False
+        self.receipt_issued = False
         self.client_left_time = None
         self.client_left_timestamp = None
         self.first_exchange_contact_time = None
@@ -386,6 +397,7 @@ class BankComplianceFSM:
             if self.session_mode != SessionType.CUSTOMER_SESSION:
                 self.session_mode = SessionType.CUSTOMER_SESSION
                 self.transaction_active = True
+                self.session_state = "TRANSACTION_IN_PROGRESS"
                 if self.customer_first_seen_time is None:
                     self.customer_first_seen_time = timecode
 
@@ -409,6 +421,21 @@ class BankComplianceFSM:
         # Если деньги убраны в сейф и клиент вышел — штатный переход в IDLE / SESSION_CLOSED
         if self.safe_deposit_completed and not customer_present:
             self.close_session()
+
+        # Фиксация машинного счета, выдачи чека и возврата части средств
+        if d.is_machine_counting:
+            self.machine_counted_in_session = True
+        if d.receipt_issued:
+            self.receipt_issued = True
+        if d.returned_part_to_client or (
+            self.machine_counted_in_session
+            and customer_present
+            and d.cashier_present
+            and d.tray_motion_score > 3000.0
+            and not self.safe_deposit_completed
+            and not self.receipt_issued
+        ):
+            self.returned_part_to_client = True
 
         self.update_session_mode(customer_present, d.timecode)
         violations: list[ComplianceViolation] = []
@@ -557,6 +584,27 @@ class BankComplianceFSM:
             self.client_left_time = None
             self.client_left_timestamp = None
 
+        # 3. Логика FSM для кейса "Пересчет -> Возврат части" (п. 19 пп. 6, п. 20 Правил № 231):
+        if self.machine_counted_in_session and self.returned_part_to_client:
+            # 1. Если клиент при этом встает и уходит БЕЗ получения документа/чека:
+            if not customer_present and not self.receipt_issued and not self.safe_deposit_completed:
+                violations.append(
+                    ComplianceViolation(
+                        timecode=d.timecode,
+                        type="ERR_NO_DOC_CONFIRMATION",
+                        law=LAW_NO_DOC_CONFIRMATION,
+                        desc=(
+                            "Возврат денежных средств / завершение счета "
+                            "без выдачи подтверждающего документа"
+                        ),
+                        severity="CRITICAL",
+                    )
+                )
+            # 2. Если оба сидят на месте и кассир оформляет документы в ПК:
+            elif customer_present and d.cashier_present:
+                # Это штатная выдача излишка / брака, НЕ ТРИГГЕРИТЬ ОШИБКУ
+                self.session_state = "ADJUSTING_DEPOSIT"
+
         # Регистрация момента первого контакта с лотком (кандидат для VLM)
         # Блокируется, если нет пары 'кассир + клиент' (п. 19 пп. 1 Правил № 231)
         if (
@@ -681,6 +729,7 @@ __all__ = [
     "LAW_CASHIER_ABSENT",
     "LAW_COUNTING_WITHOUT_CLIENT",
     "LAW_ID_CHECK",
+    "LAW_NO_DOC_CONFIRMATION",
     "LAW_PROHIBITED_ITEMS",
     "LAW_UNAUTHORIZED_ACCESS",
     "LAW_UNAUTHORIZED_ACCESS_ROOM",
