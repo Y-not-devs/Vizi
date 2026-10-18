@@ -19,9 +19,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import logging
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
+
+import cv2
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = PROJECT_ROOT / "backend"
@@ -30,12 +36,6 @@ if str(BACKEND_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-<<<<<<< HEAD
-from app.features.ai.auditor import BankComplianceAuditor
-from app.features.ai.compliance_fsm import SessionType
-from scripts.render_annotated_video import VideoOverlayAnnotator
-
-=======
 try:
     from ultralytics import YOLO  # type: ignore[import-untyped]
 except ImportError as exc:
@@ -248,8 +248,6 @@ class BankComplianceAuditor:
             "session_mode": fsm.session_mode or SessionType.INTERNAL_OPERATION,
             "frame_logs": frame_logs,
         }
-
->>>>>>> d07b3738fc15c6568c2b2c734838f8b3e647ca3d
 
 def print_compliance_table(logs: list[dict[str, Any]]) -> None:
     """Вывод структурированной таблицы соответствия по таймкодам."""

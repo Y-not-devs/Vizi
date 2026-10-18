@@ -36,10 +36,14 @@ def write_job(job: AnalysisJob) -> None:
 
 
 def read_job(job_id: str) -> AnalysisJob:
-    path = job_dir(job_id) / "job.json"
+    directory = job_dir(job_id)
+    path = directory / "job.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Job not found")
-    return AnalysisJob.model_validate_json(path.read_text(encoding="utf-8"))
+    job = AnalysisJob.model_validate_json(path.read_text(encoding="utf-8"))
+    if (directory / "annotated.mp4").is_file():
+        job.annotated_video_url = f"/v1/jobs/{job.job_id}/annotated-video"
+    return job
 
 
 def video_duration(path: Path) -> float:
@@ -127,7 +131,17 @@ def process_job(job_id: str) -> None:
                 timeout=settings.analysis_timeout_seconds,
             )
             result = json.loads(result_file.read_text(encoding="utf-8"))
-            job = AnalysisJob.model_validate({**job.model_dump(), **result, "status": "done"})
+            annotated_url = (
+                f"/v1/jobs/{job_id}/annotated-video"
+                if (directory / "annotated.mp4").is_file()
+                else None
+            )
+            job = AnalysisJob.model_validate({
+                **job.model_dump(),
+                **result,
+                "annotated_video_url": annotated_url,
+                "status": "done",
+            })
         except subprocess.TimeoutExpired:
             job.status = "failed"
             job.error = "Превышено время анализа видео"

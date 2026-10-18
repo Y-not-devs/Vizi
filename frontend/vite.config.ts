@@ -8,6 +8,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     envDir: '..',
+    define: {
+      'import.meta.env.VITE_ANALYSIS_API_KEY': JSON.stringify(env.ANALYSIS_API_KEY || ''),
+    },
     plugins: [vue()],
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },

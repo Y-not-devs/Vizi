@@ -132,3 +132,39 @@ def test_interrupted_analysis_is_recovered(client, monkeypatch, video_bytes):
 @pytest.mark.parametrize("job_id", ["invalid", "0" * 32, "..%2Foutside"])
 def test_analysis_unknown_job(client, job_id):
     assert client.get(f"/api/v1/jobs/{job_id}", headers=HEADERS).status_code == 404
+
+
+def test_annotated_video_endpoint(client, monkeypatch, video_bytes):
+    def inference(command, **_kwargs):
+        result = {
+            "verdict": "no_violation",
+            "violations": [],
+            "processed_segments_count": 1,
+            "has_annotated_video": True,
+        }
+        res_file = Path(command[-1])
+        res_file.write_text(json.dumps(result), encoding="utf-8")
+        # create mock annotated video file
+        (res_file.parent / "annotated.mp4").write_bytes(b"dummy_mp4_bytes")
+
+    monkeypatch.setattr(service.subprocess, "run", inference)
+    response = client.post(
+        "/api/v1/analyze", headers=HEADERS, files={"file": ("sample.mp4", video_bytes)}
+    )
+    job_id = response.json()["job_id"]
+    job_data = client.get(f"/api/v1/jobs/{job_id}", headers=HEADERS).json()
+    assert job_data["status"] == "done"
+    assert job_data["annotated_video_url"] == f"/v1/jobs/{job_id}/annotated-video"
+
+    # Fetch annotated video with headers
+    video_resp = client.get(f"/api/v1/jobs/{job_id}/annotated-video", headers=HEADERS)
+    assert video_resp.status_code == 200
+    assert video_resp.content == b"dummy_mp4_bytes"
+    assert "video/mp4" in video_resp.headers["content-type"]
+
+    # Fetch annotated video with query parameter api_key
+    video_query_resp = client.get(
+        f"/api/v1/jobs/{job_id}/annotated-video?api_key={HEADERS['X-API-Key']}"
+    )
+    assert video_query_resp.status_code == 200
+    assert video_query_resp.content == b"dummy_mp4_bytes"

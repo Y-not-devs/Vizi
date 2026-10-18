@@ -11,6 +11,18 @@
       </button>
 
       <div class="flex items-center gap-3">
+        <a
+          v-if="result.annotated_video_url"
+          :href="result.annotated_video_url"
+          target="_blank"
+          download
+          class="btn-secondary px-3.5 py-2 text-xs font-medium flex items-center gap-1.5 text-emerald-300 hover:text-white"
+          title="Скачать нормативное аннотированное видео (.mp4)"
+        >
+          <Download class="w-4 h-4 text-emerald-400" />
+          <span class="hidden sm:inline">Скачать аннотированное видео</span>
+        </a>
+
         <button
           @click="showRawJson = true"
           class="btn-secondary px-3.5 py-2 text-xs font-mono"
@@ -59,30 +71,82 @@
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
       <!-- Видеоплеер (5 из 12) -->
       <div class="lg:col-span-5 space-y-4 lg:sticky lg:top-20">
-        <div class="panel rounded-2xl p-4 bg-black/60 space-y-3">
-          <div class="rounded-xl overflow-hidden aspect-video bg-black border border-dark-800">
+        <div class="panel rounded-2xl p-4 bg-black/60 space-y-3.5 border border-slate-800 shadow-2xl">
+          <!-- Переключатель режима видео: Аннотированное / Исходное -->
+          <div class="flex items-center justify-between gap-2 pb-1">
+            <div class="flex items-center gap-1.5 p-1 rounded-xl bg-dark-950 border border-slate-800 text-xs">
+              <button
+                v-if="result.annotated_video_url"
+                @click="switchVideoMode('annotated')"
+                class="px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 transition-all"
+                :class="activeVideoMode === 'annotated'
+                  ? 'bg-emerald-500 text-dark-950 font-bold shadow-[0_0_12px_rgba(0,220,130,0.4)]'
+                  : 'text-slate-400 hover:text-white'"
+              >
+                <Sparkles class="w-3.5 h-3.5" />
+                <span>AI Аннотации</span>
+              </button>
+              <button
+                @click="switchVideoMode('original')"
+                class="px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 transition-all"
+                :class="activeVideoMode === 'original'
+                  ? 'bg-emerald-500 text-dark-950 font-bold shadow-[0_0_12px_rgba(0,220,130,0.4)]'
+                  : 'text-slate-400 hover:text-white'"
+              >
+                <Film class="w-3.5 h-3.5" />
+                <span>Исходное</span>
+              </button>
+            </div>
+
+            <!-- Бейдж текущего режима -->
+            <span
+              v-if="activeVideoMode === 'annotated'"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-mono font-medium"
+            >
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              HUD + ЗОНЫ
+            </span>
+            <span
+              v-else
+              class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 text-[11px] font-mono"
+            >
+              ОРИГИНАЛ
+            </span>
+          </div>
+
+          <!-- HTML5 Видеоплеер -->
+          <div class="rounded-xl overflow-hidden aspect-video bg-black border border-dark-800 relative shadow-inner">
             <video
               ref="videoPlayerRef"
-              :src="videoUrl"
+              :src="currentVideoSrc"
               controls
               playsinline
+              preload="metadata"
               class="w-full h-full object-contain"
               @timeupdate="onVideoTimeUpdate"
+              @error="handleVideoError"
             ></video>
           </div>
 
-          <div v-if="violationsCount > 0" class="pt-1 flex flex-wrap gap-2">
-            <button
-              v-for="(violation, idx) in normalizedViolations"
-              :key="idx"
-              @click="seekToTimecode(violation.timecode_sec)"
-              class="px-3 py-1.5 rounded-lg text-xs font-mono font-semibold border transition-all"
-              :class="isCurrentTimeNear(violation.timecode_sec)
-                ? 'bg-emerald-500 text-dark-950 border-emerald-400 shadow-[0_0_15px_rgba(0,220,130,0.5)] font-bold scale-105'
-                : 'bg-dark-900 border-slate-700 text-slate-300 hover:border-emerald-400 hover:text-white hover:-translate-y-0.5'"
-            >
-              {{ formatTimecode(violation.timecode_sec) }}
-            </button>
+          <!-- Таймлайн быстрых меток нарушений -->
+          <div v-if="violationsCount > 0" class="space-y-1.5 pt-1">
+            <div class="text-[11px] text-slate-400 font-mono flex items-center justify-between">
+              <span>Метки инцидентов:</span>
+              <span class="text-emerald-400">{{ formatTimecode(currentVideoTime) }}</span>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="(violation, idx) in normalizedViolations"
+                :key="idx"
+                @click="seekToTimecode(violation.timecode_sec)"
+                class="px-3 py-1.5 rounded-lg text-xs font-mono font-semibold border transition-all"
+                :class="isCurrentTimeNear(violation.timecode_sec)
+                  ? 'bg-emerald-500 text-dark-950 border-emerald-400 shadow-[0_0_15px_rgba(0,220,130,0.5)] font-bold scale-105'
+                  : 'bg-dark-900 border-slate-700 text-slate-300 hover:border-emerald-400 hover:text-white hover:-translate-y-0.5'"
+              >
+                {{ formatTimecode(violation.timecode_sec) }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -198,8 +262,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { ArrowLeft, CheckCircle2, Code2 } from 'lucide-vue-next'
+import { computed, nextTick, ref, watch } from 'vue'
+import { ArrowLeft, CheckCircle2, Code2, Download, Film, Sparkles } from 'lucide-vue-next'
 import EvidenceModal from './EvidenceModal.vue'
 import RawJsonModal from './RawJsonModal.vue'
 import { formatTimecode } from '@/lib/format'
@@ -217,6 +281,51 @@ defineEmits<{
 
 const videoPlayerRef = ref<HTMLVideoElement | null>(null)
 const currentVideoTime = ref(0)
+const activeVideoMode = ref<'annotated' | 'original'>(
+  props.result.annotated_video_url ? 'annotated' : 'original'
+)
+
+// Обновление режима при изменении props
+watch(
+  () => props.result.annotated_video_url,
+  (newUrl) => {
+    if (newUrl) {
+      activeVideoMode.value = 'annotated'
+    }
+  },
+)
+
+const currentVideoSrc = computed(() => {
+  if (activeVideoMode.value === 'annotated' && props.result.annotated_video_url) {
+    return props.result.annotated_video_url
+  }
+  return props.videoUrl || props.result.annotated_video_url || ''
+})
+
+function switchVideoMode(mode: 'annotated' | 'original') {
+  if (activeVideoMode.value === mode) return
+
+  const prevTime = videoPlayerRef.value?.currentTime ?? currentVideoTime.value
+  const wasPlaying = videoPlayerRef.value ? !videoPlayerRef.value.paused : false
+
+  activeVideoMode.value = mode
+
+  nextTick(() => {
+    if (videoPlayerRef.value) {
+      videoPlayerRef.value.currentTime = prevTime
+      if (wasPlaying) {
+        videoPlayerRef.value.play().catch(() => {})
+      }
+    }
+  })
+}
+
+function handleVideoError() {
+  if (activeVideoMode.value === 'annotated' && props.videoUrl) {
+    console.warn('Annotated video failed to load, falling back to original video')
+    activeVideoMode.value = 'original'
+  }
+}
 
 const isEvidenceModalOpen = ref(false)
 const activeEvidenceImage = ref('')

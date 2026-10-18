@@ -25,4 +25,5 @@ class AnalysisJob(BaseModel):
     violations: list[Violation] | None = None
     processing_time_sec: float | None = None
     processed_segments_count: int | None = None
+    annotated_video_url: str | None = None
     error: str | None = None

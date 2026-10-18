@@ -31,6 +31,7 @@ export interface AnalysisResponse {
   total_duration_sec?: number
   processing_time_sec?: number
   processed_segments_count?: number
+  annotated_video_url?: string
   error?: string
   video_path?: string
   raw_response?: any

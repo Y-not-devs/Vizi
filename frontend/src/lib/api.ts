@@ -21,7 +21,7 @@ export const apiConfig = {
   getApiKey(): string {
     const custom = localStorage.getItem(STORAGE_API_KEY)
     if (custom && custom.trim()) return custom.trim()
-    return ''
+    return (import.meta.env.VITE_ANALYSIS_API_KEY as string | undefined) ?? ''
   },
   setApiKey(key: string | null) {
     if (key) localStorage.setItem(STORAGE_API_KEY, key)
@@ -52,14 +52,15 @@ export async function checkBackendHealth(): Promise<{ online: boolean; message: 
     const timer = setTimeout(() => controller.abort(), 4000)
 
     // Пробуем /meta или /health
+    const reqHeaders: Record<string, string> = apiKey ? { 'X-API-Key': apiKey } : {}
     let res = await fetch(`${base}/meta`, {
-      headers: { 'X-API-Key': apiKey },
+      headers: reqHeaders,
       signal: controller.signal,
     }).catch(() => null)
 
     if (!res || !res.ok) {
       res = await fetch(`${base}/health`, {
-        headers: { 'X-API-Key': apiKey },
+        headers: reqHeaders,
         signal: controller.signal,
       }).catch(() => null)
     }
@@ -157,6 +158,21 @@ export function normalizeAnalysisResponse(raw: any, jobId: string): AnalysisResp
     verdict = 'violation'
   }
 
+  const base = apiConfig.getBaseUrl()
+  const apiKey = apiConfig.getApiKey()
+  let annotatedVideoUrl: string | undefined = undefined
+
+  if (raw.annotated_video_url) {
+    const rawUrl = String(raw.annotated_video_url)
+    const resolved = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`
+    annotatedVideoUrl = apiKey && !resolved.includes('api_key=')
+      ? `${resolved}${resolved.includes('?') ? '&' : '?'}api_key=${encodeURIComponent(apiKey)}`
+      : resolved
+  } else if (raw.has_annotated_video || status === 'done') {
+    const defaultUrl = `${base}/v1/jobs/${encodeURIComponent(raw.job_id || jobId)}/annotated-video`
+    annotatedVideoUrl = apiKey ? `${defaultUrl}?api_key=${encodeURIComponent(apiKey)}` : defaultUrl
+  }
+
   return {
     job_id: raw.job_id || jobId,
     status: status,
@@ -165,6 +181,7 @@ export function normalizeAnalysisResponse(raw: any, jobId: string): AnalysisResp
     total_duration_sec: raw.total_duration_sec,
     processing_time_sec: raw.processing_time_sec,
     processed_segments_count: raw.processed_segments_count,
+    annotated_video_url: annotatedVideoUrl,
     video_path: raw.video_path,
     error: raw.error || raw.detail,
     raw_response: raw,
@@ -182,9 +199,6 @@ export async function uploadVideoForAnalysis(
   const apiKey = apiConfig.getApiKey()
 
   const formData = new FormData()
-  if (!apiKey) {
-    throw new ApiError('Укажите API-ключ в настройках подключения.', 401)
-  }
   formData.append('file', file)
 
   // Пути для запроса с фоллбеком
@@ -197,7 +211,9 @@ export async function uploadVideoForAnalysis(
       const res = await new Promise<{ status: number; data: any }>((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         xhr.open('POST', endpoint)
-        xhr.setRequestHeader('X-API-Key', apiKey)
+        if (apiKey) {
+          xhr.setRequestHeader('X-API-Key', apiKey)
+        }
 
         if (xhr.upload && onProgress) {
           xhr.upload.onprogress = (evt) => {
@@ -274,12 +290,13 @@ export async function fetchJobStatus(jobId: string): Promise<AnalysisResponse> {
 
   for (const endpoint of endpointCandidates) {
     try {
+      const reqHeaders: Record<string, string> = {
+        Accept: 'application/json',
+        ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+      }
       const res = await fetch(endpoint, {
         method: 'GET',
-        headers: {
-          'X-API-Key': apiKey,
-          Accept: 'application/json',
-        },
+        headers: reqHeaders,
       })
 
       if (res.status === 404 && endpoint !== endpointCandidates[endpointCandidates.length - 1]) {
