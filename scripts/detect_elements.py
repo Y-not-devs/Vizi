@@ -52,6 +52,7 @@ from app.features.ai.compliance_fsm import (
     SessionType,
     VLMComplianceJudge,
     filter_reflection_and_assign_roles,
+    is_real_phone_violation,
     should_trigger_id_verification,
 )
 from app.features.ai.motion_extractor import TemporalMotionAnalyzer
@@ -142,22 +143,29 @@ class BankComplianceAuditor:
 
             cashier_present = any(p.role == "CASHIER" for p in classified_people)
             customer_count = sum(1 for p in classified_people if p.role == "CUSTOMER")
+            visitor_in_room_count = sum(1 for p in classified_people if p.role == "VISITOR_IN_CASH_ROOM")
 
-            # 2. Поиск запрещенных предметов
+            # 2. Поиск запрещенных предметов с Motion-Gated фильтрацией стационарных приборов
             detected_forbidden_names: list[str] = []
+            cashier_box = next((p.box for p in classified_people if p.role == "CASHIER"), None)
             for b in res.boxes:
                 cls_id = int(b.cls[0])
                 conf = float(b.conf[0])
                 if cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
+                    box_xyxy = [int(v) for v in b.xyxy[0].tolist()]
+                    if cls_id == CLASS_CELL_PHONE and not is_real_phone_violation(
+                        box_xyxy, (h, w), motion_score, cashier_box
+                    ):
+                        continue  # стационарная офисная техника (сканер, телефонная база)
                     item_name = self.yolo.names[cls_id]
                     detected_forbidden_names.append(item_name)
 
-            # Также проверяем смартфон в кропе высокого разрешения, если в общем кадре пропущен
-            if "cell phone" not in detected_forbidden_names and seg.get("crop_base64"):
+            # Проверка смартфона в кропе только при достаточной уверенности и динамике
+            if "cell phone" not in detected_forbidden_names and seg.get("crop_base64") and motion_score >= 3000.0:
                 crop_frame = decode_base64_to_image(seg["crop_base64"])
                 res_crop = self.yolo(crop_frame, classes=[CLASS_CELL_PHONE], verbose=False)[0]
                 for cb in res_crop.boxes:
-                    if float(cb.conf[0]) >= 0.35:
+                    if float(cb.conf[0]) >= 0.50:
                         detected_forbidden_names.append("cell phone")
                         break
 
@@ -166,24 +174,25 @@ class BankComplianceAuditor:
                 timecode=timecode,
                 cashier_present=cashier_present,
                 customer_count=customer_count,
+                visitor_in_room_count=visitor_in_room_count,
                 tray_motion_score=motion_score,
                 detected_objects=detected_forbidden_names,
                 full_frame_b64=seg["full_frame_base64"],
                 crop_b64=seg["crop_base64"],
             )
 
-            # Оценка FSM по Правилам № 231
+            # Оценка FSM по Правилам № 231 / Правилам № 14
             step_violations = fsm.evaluate_frame(frame_input)
             all_violations.extend(step_violations)
 
             # Проверка VLM-судьей (п. 19 пп. 1 Правил № 231: проверка ID-карты)
-            # Опрос VLM физически возможен только при наличии пары "кассир + клиент"
+            # Опрос VLM физически возможен при наличии пары "кассир + клиент / посетитель"
             if (
                 self.vlm_judge
                 and not vlm_checked
                 and should_trigger_id_verification(
                     cashier_present=cashier_present,
-                    customer_present=(customer_count > 0),
+                    customer_present=(customer_count > 0 or visitor_in_room_count > 0),
                     tray_motion_score=motion_score,
                     id_already_verified=vlm_checked,
                 )
@@ -193,6 +202,8 @@ class BankComplianceAuditor:
                     crop_base64=seg["crop_base64"],
                     timecode=timecode,
                 )
+                if vlm_id_verdict.get("id_presented"):
+                    fsm.id_verified = True
 
             status_str = "NORMAL"
             if step_violations:
@@ -205,6 +216,7 @@ class BankComplianceAuditor:
                     "timecode": timecode,
                     "cashier_present": cashier_present,
                     "customer_count": customer_count,
+                    "visitor_in_room_count": visitor_in_room_count,
                     "motion_score": motion_score,
                     "forbidden_items": detected_forbidden_names,
                     "status": status_str,
@@ -242,7 +254,14 @@ def print_compliance_table(logs: list[dict[str, Any]]) -> None:
     for item in logs:
         tc = f"{item['timecode']:.1f}s"
         cashier = "Присутств." if item["cashier_present"] else "ОТСУТСТВ."
-        customers = f"{item['customer_count']} чел."
+        v_room = item.get("visitor_in_room_count", 0)
+        c_count = item["customer_count"]
+        if v_room > 0 and c_count > 0:
+            customers = f"{c_count}+{v_room} пос."
+        elif v_room > 0:
+            customers = f"{v_room} посет."
+        else:
+            customers = f"{c_count} чел."
         score = f"{item['motion_score']:.0f}"
         items = ", ".join(item["forbidden_items"]) if item["forbidden_items"] else "—"
 

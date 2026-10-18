@@ -1,11 +1,16 @@
 """Тесты нормативного сценарного автомата BankComplianceFSM (Правила № 231 НБ РК)."""
 
 from app.features.ai.compliance_fsm import (
+    LAW_UNAUTHORIZED_ACCESS_ROOM,
     BankComplianceFSM,
     BankDeskZones,
     FrameDetections,
     SessionType,
     VLMComplianceJudge,
+    classify_person_strict,
+    filter_reflection_and_assign_roles,
+    is_machine_counting,
+    is_real_phone_violation,
     should_trigger_id_verification,
 )
 
@@ -247,3 +252,128 @@ def test_should_trigger_id_verification() -> None:
         tray_motion_score=5000.0,
         id_already_verified=False,
     )
+
+
+def test_motion_gated_phone_filter() -> None:
+    """Проверка фильтрации стационарной техники на кассовом столе (Motion-Gated)."""
+    # 1. Сканер штрих-кода слева внизу при низкой динамике
+    # (cx = 0.30, cy = 0.70)
+    assert not is_real_phone_violation(
+        phone_box=[100, 550, 180, 640],
+        frame_shape=(848, 464),
+        motion_crop_score=1500.0,
+        cashier_box=[160, 240, 240, 420],
+    )
+
+    # 2. Стационарный телефон / трубка справа при низкой динамике
+    # (cx = 0.75, cy = 0.60)
+    assert not is_real_phone_violation(
+        phone_box=[320, 470, 380, 550],
+        frame_shape=(848, 464),
+        motion_crop_score=1200.0,
+        cashier_box=[160, 240, 240, 420],
+    )
+
+    # 3. Реальный смартфон кассира: высокая динамика и нахождение в рабочей зоне
+    assert is_real_phone_violation(
+        phone_box=[180, 320, 220, 390],
+        frame_shape=(848, 464),
+        motion_crop_score=5500.0,
+        cashier_box=[160, 240, 240, 420],
+    )
+
+
+def test_machine_counting_detection() -> None:
+    """Проверка детекции активности купюросчетной машины через микро-ROI."""
+    import numpy as np
+
+    # Пустой diff (машинка выключена)
+    static_diff = np.zeros((848, 464), dtype=np.uint8)
+    assert not is_machine_counting(static_diff, (848, 464))
+
+    # Активный diff в зоне счетной машинки (x1=0.12*464=55, y1=0.48*848=407, x2=176, y2=695)
+    active_diff = np.zeros((848, 464), dtype=np.uint8)
+    active_diff[450:550, 70:150] = 255  # 100x80 = 8000 активных пикселей
+    assert is_machine_counting(active_diff, (848, 464), energy_threshold=500)
+
+
+def test_classify_person_strict() -> None:
+    """Проверка точечной строгой классификации ролей и фильтрации отражений."""
+    frame_shape = (848, 464)
+
+    # 1. Отражение в стекле двери (висит высоко, малая площадь)
+    # cx ~ 0.06, bot_y = 290/848 = 0.342, area = 53*69/(464*848) = 0.0093
+    reflect_box = [0, 221, 53, 290]
+    assert classify_person_strict(reflect_box, frame_shape) == "REFLECT_GLASS"
+
+    # 2. Реальный человек, вошедший через левую дверь (Ground Contact / Footprint)
+    # cx ~ 0.16, bot_y = 414/848 = 0.488, area = 74*206/(464*848) = 0.0387
+    visitor_door_box = [36, 208, 110, 414]
+    assert classify_person_strict(visitor_door_box, frame_shape) == "VISITOR_IN_CASH_ROOM"
+
+    # 3. Кассир в кресле перед столом (нижняя опора глубоко на полу перед камерой)
+    # cx ~ 0.50, bot_y = 570/848 = 0.672
+    cashier_box = [185, 388, 284, 570]
+    assert classify_person_strict(cashier_box, frame_shape) == "CASHIER"
+
+    # 4. Посетитель с внешней клиентской стороны (cx >= 0.45)
+    customer_box = [320, 250, 400, 500]
+    assert classify_person_strict(customer_box, frame_shape) == "CUSTOMER"
+
+    # 5. Комплексное распределение ролей в кадре через filter_reflection_and_assign_roles
+    boxes_with_conf = [
+        (reflect_box, 0.65),
+        (visitor_door_box, 0.85),
+        (cashier_box, 0.75),
+    ]
+    persons = filter_reflection_and_assign_roles(boxes_with_conf, frame_shape)
+    assert len(persons) == 3
+    assert any(p.role == "CASHIER" for p in persons)
+    assert any(p.role == "VISITOR_IN_CASH_ROOM" for p in persons)
+    assert any(p.role in ("REFLECT_GLASS", "REFLECTION") for p in persons)
+
+
+def test_ground_contact_no_reflection() -> None:
+    """Проверка правила: если основание BBox на полу (bottom_y > 0.55), это НЕ отражение."""
+    frame_shape = (848, 464)
+    # y2 = 500 / 848 = 0.59 > 0.55
+    standing_person = [30, 200, 110, 500]
+    role = classify_person_strict(standing_person, frame_shape)
+    assert role != "REFLECT_GLASS"
+    assert role == "VISITOR_IN_CASH_ROOM"
+
+
+def test_unauthorized_room_access_violation() -> None:
+    """Проверка п. 16 Правил № 14 / п. 14 Правил № 231 (Второй человек в помещении кассы)."""
+    fsm = BankComplianceFSM()
+
+    # В служебной зоне обнаружен посетитель/инкассатор (до проверки ID)
+    d = FrameDetections(
+        timecode=3.0,
+        cashier_present=True,
+        customer_count=0,
+        visitor_in_room_count=1,
+        tray_motion_score=8000.0,
+        detected_objects=[],
+    )
+    violations = fsm.evaluate_frame(d)
+    assert len(violations) == 1
+    assert violations[0].type == "UNAUTHORIZED_ACCESS"
+    assert violations[0].law == LAW_UNAUTHORIZED_ACCESS_ROOM
+    assert "Пункт 16" in violations[0].law
+    assert "Пункт 14" in violations[0].law
+    assert violations[0].severity == "CRITICAL"
+
+    # После успешной проверки документов VLM статус авторизуется
+    fsm.id_verified = True
+    d_verified = FrameDetections(
+        timecode=7.5,
+        cashier_present=True,
+        customer_count=0,
+        visitor_in_room_count=1,
+        tray_motion_score=8000.0,
+        detected_objects=[],
+    )
+    violations_after = fsm.evaluate_frame(d_verified)
+    assert len(violations_after) == 0
+

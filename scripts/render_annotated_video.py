@@ -49,6 +49,7 @@ from app.features.ai.compliance_fsm import (
     NormalizedZone,
     SessionType,
     filter_reflection_and_assign_roles,
+    is_real_phone_violation,
 )
 from app.features.ai.motion_extractor import BoundingBox, TemporalMotionAnalyzer
 
@@ -402,6 +403,7 @@ class VideoOverlayAnnotator:
 
                 cashier_present = False
                 customer_count = 0
+                visitor_in_room_count = 0
                 forbidden_items: list[str] = []
 
                 # 1. Извлечение людей и спектрально-размерная классификация ролей
@@ -441,7 +443,21 @@ class VideoOverlayAnnotator:
                                 is_alert=False,
                             )
                         )
-                    elif p.role == "REFLECTION":
+                    elif p.role == "VISITOR_IN_CASH_ROOM":
+                        visitor_in_room_count += 1
+                        current_boxes.append(
+                            DetectedBox(
+                                x_min=p.box[0],
+                                y_min=p.box[1],
+                                x_max=p.box[2],
+                                y_max=p.box[3],
+                                label=f"[VISITOR/INCAS] {p.confidence:.2f}",
+                                confidence=p.confidence,
+                                color=COLOR_WARN_BG,
+                                is_alert=True,
+                            )
+                        )
+                    elif p.role in ("REFLECT_GLASS", "REFLECTION"):
                         current_boxes.append(
                             DetectedBox(
                                 x_min=p.box[0],
@@ -455,12 +471,17 @@ class VideoOverlayAnnotator:
                             )
                         )
 
-                # 2. Детекция запрещенных предметов
+                # 2. Детекция запрещенных предметов с фильтрацией стационарных приборов
+                cashier_box = next((p.box for p in classified_people if p.role == "CASHIER"), None)
                 for b in res_yolo.boxes:
                     cls_id = int(b.cls[0])
                     conf = float(b.conf[0])
                     coords = [int(v) for v in b.xyxy[0].tolist()]
                     if cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
+                        if cls_id == CLASS_CELL_PHONE and not is_real_phone_violation(
+                            coords, (height, width), current_motion_score, cashier_box
+                        ):
+                            continue  # пропускаем стационарное оборудование на столе
                         item_name = self.yolo.names[cls_id]
                         forbidden_items.append(item_name)
                         current_boxes.append(
@@ -481,6 +502,7 @@ class VideoOverlayAnnotator:
                     timecode=timecode_sec,
                     cashier_present=cashier_present,
                     customer_count=customer_count,
+                    visitor_in_room_count=visitor_in_room_count,
                     tray_motion_score=current_motion_score,
                     detected_objects=forbidden_items,
                 )

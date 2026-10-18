@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 import httpx
+import numpy as np
 
 try:
     from app.core.config import get_settings
@@ -28,6 +29,7 @@ logger = logging.getLogger("fortewatch.compliance_fsm")
 
 # Нормативные ссылки на Правила № 231 НБ РК
 LAW_UNAUTHORIZED_ACCESS: Final[str] = "Пункт 14 Правил № 231 НБ РК"
+LAW_UNAUTHORIZED_ACCESS_ROOM: Final[str] = "Пункт 16 Правил № 14 / Пункт 14 Правил № 231 НБ РК"
 LAW_CASHIER_ABSENT: Final[str] = "Пункт 22 Правил № 231 НБ РК"
 LAW_COUNTING_WITHOUT_CLIENT: Final[str] = "Пункт 20 Правил № 231 НБ РК"
 LAW_PROHIBITED_ITEMS: Final[str] = "Пункт 12 Правил № 231 НБ РК"
@@ -103,7 +105,8 @@ class BankDeskZones:
 class PersonDetection:
     """Результат геометрической классификации роли человека."""
 
-    role: str  # "CASHIER", "CUSTOMER", "REFLECTION"
+    # Роли: "CASHIER", "CUSTOMER", "VISITOR_IN_CASH_ROOM", "REFLECT_GLASS", "UNKNOWN"
+    role: str
     box: list[int]
     confidence: float
     area: float
@@ -112,82 +115,97 @@ class PersonDetection:
     bottom_y: float = 0.0
 
 
+def classify_person_strict(
+    box_xyxy: list[int] | tuple[int, int, int, int],
+    frame_shape: tuple[int, int],
+) -> str:
+    """Строгая классификация силуэта по размеру, нижней точке опоры (Ground Contact) и положению.
+
+    Разделяет субъектов на:
+    1. REFLECT_GLASS: отражение в стекле двери (cx < 0.35, bottom_y < 0.44 или area < 0.022).
+    2. CASHIER: сидящий за столом кассир (0.35 <= cx <= 0.70, bottom_y >= 0.60).
+    3. VISITOR_IN_CASH_ROOM: посетитель/инкассатор у двери/стола (bottom_y >= 0.44, cx < 0.45).
+    4. CUSTOMER: посетитель с внешней стороны зоны обслуживания (bottom_y >= 0.44, cx >= 0.45).
+    5. UNKNOWN: силуэт не классифицирован.
+    """
+    h, w = frame_shape[:2]
+    x1, y1, x2, y2 = box_xyxy
+
+    cx = ((x1 + x2) / 2.0) / float(w)
+    bottom_y = float(y2) / float(h)
+    area = ((x2 - x1) * (y2 - y1)) / float(w * h)
+
+    # 1. ОТРАЖЕНИЕ В СТЕКЛЕ:
+    # Силуэт висит в воздухе на полотне двери (bottom_y < 0.44 или micro-area < 0.022)
+    if cx < 0.35 and (bottom_y < 0.44 or (bottom_y < 0.52 and area < 0.022)):
+        return "REFLECT_GLASS"
+
+    # 2. КАССИР:
+    # Сидит строго в кресле перед столом (y2 уходит к низу кадра, центр около середины стола)
+    if 0.35 <= cx <= 0.70 and bottom_y >= 0.60:
+        return "CASHIER"
+
+    # 3. ПОСЕТИТЕЛЬ / ИНКАССАТОР / ПОСТОРОННИЙ:
+    # Если человек стоит на полу кассы (bottom_y >= 0.44) и имеет физический объем (area >= 0.020)
+    if bottom_y >= 0.44 and area >= 0.020:
+        # Если зашел со стороны левой двери внутрь служебной зоны кассы к столу:
+        if cx < 0.45:
+            return "VISITOR_IN_CASH_ROOM"  # Инкассатор или посторонний за дверью
+        return "CUSTOMER"                  # Обычный клиент справа
+
+    return "UNKNOWN"
+
+
 def filter_reflection_and_assign_roles(
     boxes_with_conf: list[tuple[list[int], float]],
     frame_shape: tuple[int, int],
 ) -> list[PersonDetection]:
-    """Разделяет людей на Кассира, Клиента и Игнорируемые Отражения.
+    """Разделяет людей на Кассира, Клиента, Посетителя кассы и Игнорируемые Отражения.
 
-    Реализует Equipment Anchor Framework (якоря оборудования) и Depth/IoU фильтрацию:
-    1. Отражение в стекле двери: cx < 0.28, bottom_y < 0.60 или малая площадь (area < 0.022).
-    2. Кассир в служебном секторе оборудования:
-       - По горизонтали: между счетчиком банкнот слева (0.20) и сейфом/тумбой справа (0.68).
-       - По вертикали: за столом кабины (bottom_y <= 0.88), достаточный вес (area >= 0.020).
-    3. Клиент: с внешней стороны стойки / перед перегородкой (cx > 0.68 или bottom_y > 0.88).
+    Реализует строгую валидацию по размеру и нижней точке опоры (Ground Contact / Footprint):
+    1. Исключает дубликаты детекций одного человека через Non-Maximum Suppression (IoU > 0.45).
+    2. Исключает отражения в стекле двери (REFLECT_GLASS).
+    3. Привязывает сидящего кассира к креслу перед столом (CASHIER).
+    4. Распознает вошедшего через служебную дверь субъекта (VISITOR_IN_CASH_ROOM).
+    5. Если в кадре нет сидящего кассира (например, кассир стоит за столом в Х-14),
+       субъект в рабочей зоне кассы (0.20 <= cx <= 0.68) назначается CASHIER.
     """
     h_img, w_img = frame_shape[:2]
-    assigned_persons: list[PersonDetection] = []
 
-    for box, conf in boxes_with_conf:
-        if conf < 0.35:
+    # 1. NMS дедупликация пересекающихся рамок одного и того же человека
+    sorted_boxes = sorted(boxes_with_conf, key=lambda x: x[1], reverse=True)
+    kept_boxes: list[tuple[list[int], float]] = []
+    for b, c in sorted_boxes:
+        if c < 0.35:
             continue
+        is_dup = False
+        for kb, _ in kept_boxes:
+            ix1 = max(b[0], kb[0])
+            iy1 = max(b[1], kb[1])
+            ix2 = min(b[2], kb[2])
+            iy2 = min(b[3], kb[3])
+            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            a1 = (b[2] - b[0]) * (b[3] - b[1])
+            a2 = (kb[2] - kb[0]) * (kb[3] - kb[1])
+            union = a1 + a2 - inter
+            if union > 0 and (inter / union) > 0.45:
+                is_dup = True
+                break
+        if not is_dup:
+            kept_boxes.append((b, c))
+
+    assigned_persons: list[PersonDetection] = []
+    for box, conf in kept_boxes:
         x1, y1, x2, y2 = box
         cx = ((x1 + x2) / 2.0) / float(w_img)
         cy = ((y1 + y2) / 2.0) / float(h_img)
-        box_w = (x2 - x1) / float(w_img)
-        box_h = (y2 - y1) / float(h_img)
-        area = box_w * box_h
+        area = ((x2 - x1) * (y2 - y1)) / float(w_img * h_img)
         bottom_y = float(y2) / float(h_img)
 
-        # 1. Отражение в стекле двери (слева в проеме)
-        if cx < 0.28 and (bottom_y < 0.60 or area < 0.022):
-            assigned_persons.append(
-                PersonDetection(
-                    role="REFLECTION",
-                    box=box,
-                    confidence=conf,
-                    area=area,
-                    cx=cx,
-                    cy=cy,
-                    bottom_y=bottom_y,
-                )
-            )
-            continue
-
-        # 2. Кассир (внутри сектора оборудования от счетной машинки до сейфа за столом)
-        if 0.20 <= cx <= 0.68 and bottom_y <= 0.88 and area >= 0.020:
-            assigned_persons.append(
-                PersonDetection(
-                    role="CASHIER",
-                    box=box,
-                    confidence=conf,
-                    area=area,
-                    cx=cx,
-                    cy=cy,
-                    bottom_y=bottom_y,
-                )
-            )
-            continue
-
-        # 3. Клиент (с внешней стороны зоны обслуживания)
-        if (cx > 0.65 or bottom_y > 0.88) and area >= 0.020:
-            assigned_persons.append(
-                PersonDetection(
-                    role="CUSTOMER",
-                    box=box,
-                    confidence=conf,
-                    area=area,
-                    cx=cx,
-                    cy=cy,
-                    bottom_y=bottom_y,
-                )
-            )
-            continue
-
-        # Мелкие нерелевантные тени / отражения
+        role = classify_person_strict(box, frame_shape)
         assigned_persons.append(
             PersonDetection(
-                role="REFLECTION",
+                role=role,
                 box=box,
                 confidence=conf,
                 area=area,
@@ -197,7 +215,86 @@ def filter_reflection_and_assign_roles(
             )
         )
 
+    # Корректировка: если сидящего в кресле кассира нет в кадре, но есть кассир,
+    # перемещающийся вдоль стола оборудования (0.20 <= cx <= 0.68, bottom_y >= 0.44)
+    has_seated_cashier = any(p.role == "CASHIER" for p in assigned_persons)
+    if not has_seated_cashier:
+        for p in assigned_persons:
+            is_candidate = (
+                p.role in ("VISITOR_IN_CASH_ROOM", "CUSTOMER", "UNKNOWN")
+                and 0.20 <= p.cx <= 0.68
+                and p.bottom_y >= 0.44
+            )
+            if is_candidate:
+                p.role = "CASHIER"
+                break
+
     return assigned_persons
+
+
+# Нормализованные координаты купюросчетной машины слева на столе (x1, y1, x2, y2)
+COUNTING_MACHINE_RECT: Final[tuple[float, float, float, float]] = (0.12, 0.48, 0.38, 0.82)
+
+
+def is_real_phone_violation(
+    phone_box: list[int] | tuple[int, int, int, int],
+    frame_shape: tuple[int, int],
+    motion_crop_score: float = 0.0,
+    cashier_box: list[int] | tuple[int, int, int, int] | None = None,
+) -> bool:
+    """Фильтр статики (Motion-Gated Object Detection) для исключения офисной техники на столе.
+
+    Все постоянные приборы на столе стоят неподвижно от начала и до конца видео.
+    Мобильный телефон кассир берёт в руки, двигает им либо достаёт из кармана.
+
+    Телефон считается нарушением ТОЛЬКО если:
+    1. Он не находится в координатах стационарного сканера (cx < 0.45, cy > 0.65)
+       или телефонного аппарата / терминала справа (cx > 0.65, cy > 0.55) при невысокой динамике.
+    2. Объект имеет признаки реального движения / взаимодействия с кассиром.
+    """
+    px1, py1, px2, py2 = phone_box
+    h, w = frame_shape[:2]
+    cx = ((px1 + px2) / 2.0) / float(w)
+    cy = ((py1 + py2) / 2.0) / float(h)
+
+    # 1. Сканер слева внизу и телефонная трубка / терминал справа
+    if (cx < 0.45 and cy > 0.65) or (cx > 0.65 and cy > 0.55):
+        if motion_crop_score < 3000.0:
+            return False  # Офисная техника на столе
+
+    # 2. Периферийные статические артефакты в отсутствие движения кассира
+    if cashier_box is not None:
+        kx1, ky1, kx2, ky2 = cashier_box
+        if (px2 < kx1 - 40 or px1 > kx2 + 80) and motion_crop_score < 3000.0:
+            return False
+
+    return True
+
+
+def is_machine_counting(
+    frame_diff: np.ndarray,
+    frame_shape: tuple[int, int],
+    machine_rect: tuple[float, float, float, float] = COUNTING_MACHINE_RECT,
+    energy_threshold: int = 500,
+) -> bool:
+    """Детектирует работу купюросчетной машины через высокочастотную динамику в микро-ROI.
+
+    Когда счетная машинка работает, руки кассира могут лежать неподвижно на столе,
+    но в узкой зоне выгрузного кармана счетной машинки пиксели мерцают с высокой
+    частотой, пока банкноты вылетают в стек.
+    """
+    h, w = frame_shape[:2]
+    x1 = int(machine_rect[0] * w)
+    y1 = int(machine_rect[1] * h)
+    x2 = int(machine_rect[2] * w)
+    y2 = int(machine_rect[3] * h)
+
+    machine_crop_diff = frame_diff[y1:y2, x1:x2]
+    if machine_crop_diff.size == 0:
+        return False
+
+    motion_energy = int(np.sum(machine_crop_diff > 25))
+    return motion_energy > energy_threshold
 
 
 @dataclass(slots=True)
@@ -205,10 +302,12 @@ class FrameDetections:
     """Срез детекций кадра для подачи в FSM."""
 
     timecode: float
-    cashier_present: bool          # person внутри Cashier Zone
-    customer_count: int            # количество person в Customer Zone
-    tray_motion_score: float       # активность из TemporalMotionAnalyzer
-    detected_objects: list[str]    # обнаруженные объекты ['cell phone', 'bottle', 'cup']
+    cashier_present: bool              # person внутри Cashier Zone
+    customer_count: int                # количество person в Customer Zone
+    tray_motion_score: float           # активность из TemporalMotionAnalyzer
+    detected_objects: list[str]        # обнаруженные объекты ['cell phone', 'bottle', 'cup']
+    visitor_in_room_count: int = 0     # количество посторонних в служебной зоне кассы
+    is_machine_counting: bool = False  # активность купюросчетной машинки
     full_frame_b64: str | None = None
     crop_b64: str | None = None
 
@@ -303,9 +402,24 @@ class BankComplianceFSM:
 
     def evaluate_frame(self, d: FrameDetections) -> list[ComplianceViolation]:
         """Оценка кадра по нормативным статьям с учетом контекста сессии."""
-        customer_present = d.customer_count > 0
+        customer_present = (d.customer_count > 0) or (d.visitor_in_room_count > 0)
         self.update_session_mode(customer_present, d.timecode)
         violations: list[ComplianceViolation] = []
+
+        # 0. Постороннее лицо в служебной зоне кассы (п. 16 Правил № 14 / п. 14 Правил № 231)
+        if d.visitor_in_room_count > 0 and not self.id_verified:
+            violations.append(
+                ComplianceViolation(
+                    timecode=d.timecode,
+                    type="UNAUTHORIZED_ACCESS",
+                    law=LAW_UNAUTHORIZED_ACCESS_ROOM,
+                    desc=(
+                        "Несанкционированное присутствие постороннего лица в кассовом узле "
+                        f"({d.visitor_in_room_count} чел.). Доступ в закрытый контур ограничен."
+                    ),
+                    severity="CRITICAL",
+                )
+            )
 
         # --- ОБЩИЕ ПРАВИЛА ДЛЯ ОБОИХ РЕЖИМОВ ---
         # 1. Личные вещи / еда / напитки / телефон (п. 12 Правил № 231)
@@ -380,14 +494,15 @@ class BankComplianceFSM:
         # ВЕТКА 2: ОБСЛУЖИВАНИЕ КЛИЕНТА (CUSTOMER_SESSION)
         # ==============================================================
         # 1. Постороннее лицо в зоне обслуживания (п. 14 Правил № 231)
-        if d.customer_count > 1:
+        total_customers = d.customer_count + d.visitor_in_room_count
+        if total_customers > 1:
             violations.append(
                 ComplianceViolation(
                     timecode=d.timecode,
                     type="UNAUTHORIZED_ACCESS",
                     law=LAW_UNAUTHORIZED_ACCESS,
                     desc=(
-                        f"В зоне обслуживания зафиксировано {d.customer_count} посетителей "
+                        f"В зоне обслуживания зафиксировано {total_customers} посетителей "
                         f"(допускается строго не более одного клиента)"
                     ),
                     severity="HIGH",
@@ -396,11 +511,16 @@ class BankComplianceFSM:
 
         # 2. Пересчет денег в отсутствие клиента (п. 20 Правил № 231)
         # Срабатывает ТОЛЬКО если клиент реально был в сессии, но ушел до завершения пересчета
-        if self.ever_seen_customer and d.customer_count == 0 and d.cashier_present:
-            if d.tray_motion_score > 4000.0:
+        if self.ever_seen_customer and total_customers == 0 and d.cashier_present:
+            if d.is_machine_counting or d.tray_motion_score > 4000.0:
                 if self.client_left_time is None:
                     self.client_left_time = d.timecode
                 elif d.timecode - self.client_left_time >= 2.0:
+                    activity_str = (
+                        "работа счетной машинки"
+                        if d.is_machine_counting
+                        else f"активность лотка {d.tray_motion_score:.0f}"
+                    )
                     violations.append(
                         ComplianceViolation(
                             timecode=d.timecode,
@@ -408,7 +528,7 @@ class BankComplianceFSM:
                             law=LAW_COUNTING_WITHOUT_CLIENT,
                             desc=(
                                 "Клиент покинул кассовую кабину до завершения пересчета "
-                                f"внесенных денег (активность лотка: {d.tray_motion_score:.0f})"
+                                f"внесенных денег ({activity_str})"
                             ),
                             severity="CRITICAL",
                         )
