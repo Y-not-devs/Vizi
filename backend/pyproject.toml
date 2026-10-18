@@ -13,6 +13,7 @@ dependencies = [
     "bcrypt>=4.2.0",              # модуль auth
     "numpy>=2.0.0",               # обработка массивов и медианное окно
     "opencv-python-headless>=4.10.0", # компьютерное зрение ForteWatch
+    "ultralytics>=8.3.0",         # детекция объектов (YOLOv8)
 ]
 
 [project.optional-dependencies]
