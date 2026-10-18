@@ -6,7 +6,9 @@ from app.features.ai.compliance_fsm import (
     ComplianceViolation,
     FrameDetections,
     NormalizedZone,
+    PersonDetection,
     VLMComplianceJudge,
+    filter_reflection_and_assign_roles,
 )
 
 __all__ = [
@@ -15,5 +17,7 @@ __all__ = [
     "ComplianceViolation",
     "FrameDetections",
     "NormalizedZone",
+    "PersonDetection",
     "VLMComplianceJudge",
+    "filter_reflection_and_assign_roles",
 ]

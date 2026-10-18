@@ -47,6 +47,7 @@ from app.features.ai.compliance_fsm import (
     ComplianceViolation,
     FrameDetections,
     NormalizedZone,
+    filter_reflection_and_assign_roles,
 )
 from app.features.ai.motion_extractor import BoundingBox, TemporalMotionAnalyzer
 
@@ -402,56 +403,63 @@ class VideoOverlayAnnotator:
                 customer_count = 0
                 forbidden_items: list[str] = []
 
-                for b in res_yolo.boxes:
-                    cls_id = int(b.cls[0])
-                    conf = float(b.conf[0])
-                    coords = [int(v) for v in b.xyxy[0].tolist()]
+                # 1. Извлечение людей и спектрально-размерная классификация ролей
+                person_boxes = [
+                    ([int(v) for v in b.xyxy[0].tolist()], float(b.conf[0]))
+                    for b in res_yolo.boxes
+                    if int(b.cls[0]) == CLASS_PERSON
+                ]
+                classified_people = filter_reflection_and_assign_roles(person_boxes, (height, width))
 
-                    cx = ((coords[0] + coords[2]) / 2.0) / float(width)
-                    cy = ((coords[1] + coords[3]) / 2.0) / float(height)
-
-                    if cls_id == CLASS_PERSON and conf >= 0.40:
-                        box_h_ratio = (coords[3] - coords[1]) / float(height)
-
-                        # Решение 1 + 3: Обнаружение отражения в стекле двери
-                        if self.zones.is_glass_reflection(cx, cy, box_h_ratio):
-                            current_boxes.append(
-                                DetectedBox(
-                                    x_min=coords[0],
-                                    y_min=coords[1],
-                                    x_max=coords[2],
-                                    y_max=coords[3],
-                                    label=f"[REFLECT: GLASS] {conf:.2f}",
-                                    confidence=conf,
-                                    color=COLOR_REFLECTION,
-                                    is_alert=False,
-                                )
-                            )
-                            continue
-
-                        is_cashier = self.zones.cashier_zone.contains_point(cx, cy)
-                        if is_cashier or (cy >= 0.45 and 0.25 <= cx <= 0.85):
-                            cashier_present = True
-                            role_label = f"CASHIER: {conf:.2f}"
-                        elif self.zones.is_valid_customer(cx, cy, box_h_ratio):
-                            customer_count += 1
-                            role_label = f"CUSTOMER: {conf:.2f}"
-                        else:
-                            continue
-
+                for p in classified_people:
+                    if p.role == "CASHIER":
+                        cashier_present = True
                         current_boxes.append(
                             DetectedBox(
-                                x_min=coords[0],
-                                y_min=coords[1],
-                                x_max=coords[2],
-                                y_max=coords[3],
-                                label=role_label,
-                                confidence=conf,
+                                x_min=p.box[0],
+                                y_min=p.box[1],
+                                x_max=p.box[2],
+                                y_max=p.box[3],
+                                label=f"CASHIER: {p.confidence:.2f}",
+                                confidence=p.confidence,
                                 color=COLOR_PERSON,
                                 is_alert=False,
                             )
                         )
-                    elif cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
+                    elif p.role == "CUSTOMER":
+                        customer_count += 1
+                        current_boxes.append(
+                            DetectedBox(
+                                x_min=p.box[0],
+                                y_min=p.box[1],
+                                x_max=p.box[2],
+                                y_max=p.box[3],
+                                label=f"CUSTOMER: {p.confidence:.2f}",
+                                confidence=p.confidence,
+                                color=COLOR_PERSON,
+                                is_alert=False,
+                            )
+                        )
+                    elif p.role == "REFLECTION":
+                        current_boxes.append(
+                            DetectedBox(
+                                x_min=p.box[0],
+                                y_min=p.box[1],
+                                x_max=p.box[2],
+                                y_max=p.box[3],
+                                label=f"[REFLECT: GLASS] {p.confidence:.2f}",
+                                confidence=p.confidence,
+                                color=COLOR_REFLECTION,
+                                is_alert=False,
+                            )
+                        )
+
+                # 2. Детекция запрещенных предметов
+                for b in res_yolo.boxes:
+                    cls_id = int(b.cls[0])
+                    conf = float(b.conf[0])
+                    coords = [int(v) for v in b.xyxy[0].tolist()]
+                    if cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
                         item_name = self.yolo.names[cls_id]
                         forbidden_items.append(item_name)
                         current_boxes.append(

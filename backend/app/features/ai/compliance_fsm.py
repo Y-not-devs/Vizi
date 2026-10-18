@@ -81,36 +81,113 @@ class BankDeskZones:
     # 5. Решение 3: Минимальный относительный рост реального посетителя
     min_customer_height_ratio: float = 0.28
 
-    def is_glass_reflection(
-        self,
-        cx: float,
-        cy: float,
-        box_h_ratio: float = 1.0,
-    ) -> bool:
-        """Решение 1 и 3: Проверка попадания детекции в маску стекла либо малого силуэта."""
-        # Решение 1: Маска исключения отражающей поверхности двери
+    def is_glass_reflection(self, cx: float, cy: float, box_h_ratio: float = 0.0) -> bool:
+        """Проверяет, является ли детекция отражением в стеклянной двери."""
         if self.glass_door_exclusion.contains_point(cx, cy):
             return True
-        # Решение 3: Фильтр по высоте для объектов в левой/дальней части
-        if cx < 0.40 and box_h_ratio < self.min_customer_height_ratio:
+        if cx < 0.38 and cy < 0.52 and box_h_ratio < self.min_customer_height_ratio:
             return True
         return False
 
-    def is_valid_customer(
-        self,
-        cx: float,
-        cy: float,
-        box_h_ratio: float,
-    ) -> bool:
-        """Синтез Решений 1, 2 и 3: Валидация реального посетителя перед кассой."""
-        # 1. Отсечение маской отражений
+    def is_valid_customer(self, cx: float, cy: float, box_h_ratio: float = 0.0) -> bool:
+        """Проверяет, является ли человек реальным посетителем в клиентской зоне."""
         if self.is_glass_reflection(cx, cy, box_h_ratio):
             return False
-        # 3. Отсечение по минимальному размеру
-        if box_h_ratio < self.min_customer_height_ratio:
+        if box_h_ratio > 0.0 and box_h_ratio < self.min_customer_height_ratio:
             return False
-        # 2. Попадание в суженную зону обслуживания перед стойкой
         return self.customer_zone.contains_point(cx, cy)
+
+@dataclass(slots=True)
+class PersonDetection:
+    """Результат геометрической классификации роли человека."""
+
+    role: str  # "CASHIER", "CUSTOMER", "REFLECTION"
+    box: list[int]
+    confidence: float
+    area: float
+    cx: float
+    cy: float
+
+
+def filter_reflection_and_assign_roles(
+    boxes_with_conf: list[tuple[list[int], float]],
+    frame_shape: tuple[int, int],
+) -> list[PersonDetection]:
+    """Разделяет людей на Кассира, Клиента и Игнорируемые Отражения.
+
+    Реализует геометрический спектрально-размерный фильтр (Depth & IoU Heuristic):
+    1. Отражение в левой стеклянной двери: cx < 0.28, cy < 0.48 и мелкая площадь (area < 0.022).
+    2. Кассир: на переднем плане в зоне стола (0.25 <= cx <= 0.65, cy >= 0.35, area >= 0.020).
+    3. Клиент: реальный посетитель с достаточным геометрическим весом (area >= 0.020).
+    """
+    h_img, w_img = frame_shape[:2]
+    assigned_persons: list[PersonDetection] = []
+
+    for box, conf in boxes_with_conf:
+        if conf < 0.35:
+            continue
+        x1, y1, x2, y2 = box
+        cx = ((x1 + x2) / 2.0) / float(w_img)
+        cy = ((y1 + y2) / 2.0) / float(h_img)
+        box_w = (x2 - x1) / float(w_img)
+        box_h = (y2 - y1) / float(h_img)
+        area = box_w * box_h
+
+        # 1. Отражение в стекле двери (мелкий силуэт в левом проеме)
+        if cx < 0.28 and cy < 0.48 and area < 0.022:
+            assigned_persons.append(
+                PersonDetection(
+                    role="REFLECTION",
+                    box=box,
+                    confidence=conf,
+                    area=area,
+                    cx=cx,
+                    cy=cy,
+                )
+            )
+            continue
+
+        # 2. Кассир (всегда в центре/на переднем плане за столом кассы)
+        if 0.25 <= cx <= 0.65 and cy >= 0.35 and area >= 0.020:
+            assigned_persons.append(
+                PersonDetection(
+                    role="CASHIER",
+                    box=box,
+                    confidence=conf,
+                    area=area,
+                    cx=cx,
+                    cy=cy,
+                )
+            )
+            continue
+
+        # 3. Клиент (реальный посетитель в зоне обслуживания)
+        if area >= 0.020:
+            assigned_persons.append(
+                PersonDetection(
+                    role="CUSTOMER",
+                    box=box,
+                    confidence=conf,
+                    area=area,
+                    cx=cx,
+                    cy=cy,
+                )
+            )
+            continue
+
+        # Мелкие нерелевантные тени / отражения
+        assigned_persons.append(
+            PersonDetection(
+                role="REFLECTION",
+                box=box,
+                confidence=conf,
+                area=area,
+                cx=cx,
+                cy=cy,
+            )
+        )
+
+    return assigned_persons
 
 
 @dataclass(slots=True)

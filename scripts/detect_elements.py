@@ -50,6 +50,7 @@ from app.features.ai.compliance_fsm import (
     ComplianceViolation,
     FrameDetections,
     VLMComplianceJudge,
+    filter_reflection_and_assign_roles,
 )
 from app.features.ai.motion_extractor import TemporalMotionAnalyzer
 
@@ -129,34 +130,23 @@ class BankComplianceAuditor:
             res = self.yolo(full_frame, classes=TRACKED_CLASSES, verbose=False)[0]
 
             cashier_present = False
-            customer_count = 0
-            detected_forbidden_names: list[str] = []
+            # 1. Спектрально-размерная классификация людей (Кассир, Клиент, Отражение)
+            person_boxes = [
+                ([int(v) for v in b.xyxy[0].tolist()], float(b.conf[0]))
+                for b in res.boxes
+                if int(b.cls[0]) == CLASS_PERSON
+            ]
+            classified_people = filter_reflection_and_assign_roles(person_boxes, (h, w))
 
+            cashier_present = any(p.role == "CASHIER" for p in classified_people)
+            customer_count = sum(1 for p in classified_people if p.role == "CUSTOMER")
+
+            # 2. Поиск запрещенных предметов
+            detected_forbidden_names: list[str] = []
             for b in res.boxes:
                 cls_id = int(b.cls[0])
                 conf = float(b.conf[0])
-                coords = b.xyxy[0].tolist()
-
-                # Нормализованный центр объекта
-                cx = ((coords[0] + coords[2]) / 2.0) / float(w)
-                cy = ((coords[1] + coords[3]) / 2.0) / float(h)
-
-                if cls_id == CLASS_PERSON and conf >= 0.40:
-                    box_h_ratio = (coords[3] - coords[1]) / float(h)
-
-                    # Решение 1 + 3: Проверка на отражение в стекле двери (отбрасываем)
-                    if self.zones.is_glass_reflection(cx, cy, box_h_ratio):
-                        continue
-
-                    # Проверка зоны кассира
-                    is_cashier = self.zones.cashier_zone.contains_point(cx, cy)
-                    if is_cashier or (cy >= 0.45 and 0.25 <= cx <= 0.85):
-                        cashier_present = True
-                    # Решение 2 + 3: Валидация реального посетителя в суженной зоне обслуживания
-                    elif self.zones.is_valid_customer(cx, cy, box_h_ratio):
-                        customer_count += 1
-
-                elif cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
+                if cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
                     item_name = self.yolo.names[cls_id]
                     detected_forbidden_names.append(item_name)
 
