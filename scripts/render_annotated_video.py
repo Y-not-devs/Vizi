@@ -54,6 +54,7 @@ from app.features.ai.compliance_fsm import (
     VLMComplianceJudge,
     filter_reflection_and_assign_roles,
     get_person_display_attributes,
+    is_customer_at_desk,
     is_real_phone_violation,
     should_trigger_id_verification,
 )
@@ -419,7 +420,15 @@ class VideoOverlayAnnotator:
                 classified_people = filter_reflection_and_assign_roles(person_boxes, (height, width))
 
                 cashier_present = any(p.role == "CASHIER" for p in classified_people)
-                customer_count = sum(1 for p in classified_people if p.role == "CUSTOMER")
+                customer_at_desk = any(
+                    p.role == "CUSTOMER" and is_customer_at_desk(p.box, (height, width))
+                    for p in classified_people
+                )
+                customer_count = sum(
+                    1
+                    for p in classified_people
+                    if p.role == "CUSTOMER" and is_customer_at_desk(p.box, (height, width))
+                )
                 visitor_in_room_count = sum(
                     1
                     for p in classified_people
@@ -480,6 +489,7 @@ class VideoOverlayAnnotator:
                     timecode=timecode_sec,
                     cashier_present=cashier_present,
                     customer_count=customer_count,
+                    customer_at_desk=customer_at_desk,
                     visitor_in_room_count=visitor_in_room_count,
                     tray_motion_score=current_motion_score,
                     detected_objects=forbidden_items,
@@ -496,12 +506,18 @@ class VideoOverlayAnnotator:
                     "tray_active": current_motion_score > 3000.0,
                     "customer_count": customer_count + visitor_in_room_count,
                     "pending": timecode_sec < 4.0 and not fsm.id_verified,
+                    "client_left_premises": fsm.client_left_premises,
+                    "client_left_time": fsm.client_left_time,
                 }
 
                 # Dynamic State Promotion: формирование Bounding Boxes людей
                 for p in classified_people:
                     disp_label, disp_color = get_person_display_attributes(
-                        p.role, session_context, confidence=p.confidence
+                        p.role,
+                        session_context,
+                        confidence=p.confidence,
+                        person_box=p.box,
+                        frame_shape=(height, width),
                     )
                     is_alert = (disp_color == COLOR_VIOLATION)
                     current_boxes.append(

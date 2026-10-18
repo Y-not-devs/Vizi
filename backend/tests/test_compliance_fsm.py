@@ -6,6 +6,7 @@ from app.features.ai.compliance_fsm import (
     COLOR_PENDING,
     COLOR_REFLECTION,
     COLOR_VIOLATION,
+    LAW_CLIENT_ABSENT,
     LAW_NO_DOC_CONFIRMATION,
     LAW_UNAUTHORIZED_ACCESS_ROOM,
     AdaptiveCashierTopology,
@@ -17,6 +18,7 @@ from app.features.ai.compliance_fsm import (
     classify_person_strict,
     filter_reflection_and_assign_roles,
     get_person_display_attributes,
+    is_customer_at_desk,
     is_machine_counting,
     is_real_phone_violation,
     should_trigger_id_verification,
@@ -750,6 +752,121 @@ def test_adjusting_deposit_and_no_doc_confirmation() -> None:
     )
     err_violations = [v for v in v_ok if v.type == "ERR_NO_DOC_CONFIRMATION"]
     assert len(err_violations) == 0
+
+
+def test_client_absent_err_and_hud_update() -> None:
+    """Проверка п. 20 Правил № 231 (ERR_CLIENT_ABSENT) и динамического сброса HUD.
+
+    1. Геометрическая детекция выхода к двери:
+       - Клиент за столом (cx=0.38, bottom_y=0.58) -> is_customer_at_desk=True.
+       - Клиент ушел влево к стеклянной двери (cx=0.25 < 0.35) -> is_customer_at_desk=False.
+    2. Dynamic State Promotion HUD:
+       - Пока клиент у стола и верифицирован -> [CLIENT: VERIFIED] (зеленый).
+       - Когда клиент ушел к двери -> [!] CLIENT LEFT PREMISES (красный COLOR_VIOLATION).
+    3. FSM-аккредитация нарушения:
+       - Клиент ушел, деньги на столе не убраны в сейф, таймаут >= 1.5 сек.
+       - Триггерится нарушение ERR_CLIENT_ABSENT по п. 20 Правил № 231.
+    """
+    frame_shape = (848, 464)
+
+    # 1. Проверка функции is_customer_at_desk
+    box_at_desk = [150, 280, 230, 500]  # cx = 190/464 = 0.409, bottom_y = 500/848 = 0.589
+    assert is_customer_at_desk(box_at_desk, frame_shape) is True
+
+    box_at_door = [40, 200, 120, 480]   # cx = 80/464 = 0.172 (< 0.35)
+    assert is_customer_at_desk(box_at_door, frame_shape) is False
+
+    # 2. Проверка HUD Dynamic State Promotion при уходе к двери
+    session_ctx = {
+        "id_verified": True,
+        "operation_active": True,
+        "customer_count": 1,
+        "client_left_premises": False,
+    }
+
+    # Пока человек за столом - зеленый VERIFIED
+    label_desk, color_desk = get_person_display_attributes(
+        "CUSTOMER",
+        session_ctx,
+        confidence=0.85,
+        person_box=box_at_desk,
+        frame_shape=frame_shape,
+    )
+    assert "[CLIENT: VERIFIED]" in label_desk
+    assert color_desk == COLOR_CLIENT_VERIFIED
+
+    # Человек развернулся и ушел в коридор к стеклянной двери (cx < 0.35)
+    label_door, color_door = get_person_display_attributes(
+        "CUSTOMER",
+        session_ctx,
+        confidence=0.85,
+        person_box=box_at_door,
+        frame_shape=frame_shape,
+    )
+    assert "[!] CLIENT LEFT PREMISES" in label_door
+    assert color_door == COLOR_VIOLATION
+
+    # 3. Проверка FSM для ERR_CLIENT_ABSENT
+    fsm = BankComplianceFSM()
+    # 3.1 Начало сессии обслуживания
+    fsm.evaluate_frame(
+        FrameDetections(
+            timecode=1.0,
+            cashier_present=True,
+            customer_count=1,
+            customer_at_desk=True,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert fsm.transaction_active is True
+
+    # 3.2 Клиент только что сделал шаг к выходу (t=10.0, 0 сек)
+    v0 = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=10.0,
+            cashier_present=True,
+            customer_count=0,
+            customer_at_desk=False,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v0) == 0
+    assert fsm.client_left_premises is False
+
+    # 3.3 Прошло 1.0 сек (еще нет 1.5 сек)
+    v1 = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=11.0,
+            cashier_present=True,
+            customer_count=0,
+            customer_at_desk=False,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v1) == 0
+
+    # 3.4 Прошло 1.6 сек -> триггер нарушения п. 20 (ERR_CLIENT_ABSENT)
+    v2 = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=11.6,
+            cashier_present=True,
+            customer_count=0,
+            customer_at_desk=False,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v2) == 1
+    assert v2[0].type == "ERR_CLIENT_ABSENT"
+    assert v2[0].law == LAW_CLIENT_ABSENT
+    assert "п. 20" in v2[0].law
+    assert "Клиент покинул кассовое помещение" in v2[0].desc
+    assert v2[0].severity == "CRITICAL"
+    assert fsm.client_left_premises is True
+
 
 
 

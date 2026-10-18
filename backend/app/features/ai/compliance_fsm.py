@@ -28,6 +28,7 @@ from app.features.ai.adaptive_topology import (
     COLOR_VIOLATION,
     AdaptiveCashierTopology,
     get_person_display_attributes,
+    is_customer_at_desk,
 )
 
 try:
@@ -42,6 +43,7 @@ LAW_UNAUTHORIZED_ACCESS: Final[str] = "Пункт 14 Правил № 231 НБ �
 LAW_UNAUTHORIZED_ACCESS_ROOM: Final[str] = "Пункт 16 Правил № 14 / Пункт 14 Правил № 231 НБ РК"
 LAW_CASHIER_ABSENT: Final[str] = "Пункт 22 Правил № 231 НБ РК"
 LAW_COUNTING_WITHOUT_CLIENT: Final[str] = "Пункт 20 Правил № 231 НБ РК"
+LAW_CLIENT_ABSENT: Final[str] = "п. 20 Правил № 231"
 LAW_PROHIBITED_ITEMS: Final[str] = "Пункт 12 Правил № 231 НБ РК"
 LAW_ID_CHECK: Final[str] = "Пункт 18 Правил № 231 НБ РК"
 LAW_NO_DOC_CONFIRMATION: Final[str] = "п. 19 пп. 6), п. 20 Правил № 231 НБ РК"
@@ -275,6 +277,7 @@ class FrameDetections:
     safe_deposit_completed: bool = False  # деньги убраны в сейф/тумбу (п. 19/20)
     receipt_issued: bool = False       # выдан чек/ордер клиенту (п. 19 пп. 6)
     returned_part_to_client: bool = False  # факт возврата части купюр клиенту (п. 20)
+    customer_at_desk: bool | None = None   # находится ли клиент за столом (п. 20)
     full_frame_b64: str | None = None
     crop_b64: str | None = None
 
@@ -355,6 +358,7 @@ class BankComplianceFSM:
         self.machine_counted_in_session: bool = False
         self.returned_part_to_client: bool = False
         self.receipt_issued: bool = False
+        self.client_left_premises: bool = False
         self.customer_first_seen_time: float | None = None
         self.client_left_time: float | None = None
         self.client_left_timestamp: float | None = None
@@ -383,6 +387,7 @@ class BankComplianceFSM:
         self.machine_counted_in_session = False
         self.returned_part_to_client = False
         self.receipt_issued = False
+        self.client_left_premises = False
         self.client_left_time = None
         self.client_left_timestamp = None
         self.first_exchange_contact_time = None
@@ -552,37 +557,65 @@ class BankComplianceFSM:
                 )
             )
 
-        # 2. Пересчет денег в отсутствие клиента (п. 20 Правил № 231)
-        # Срабатывает ТОЛЬКО если клиент реально был в сессии, но ушел до завершения пересчета
-        if self.ever_seen_customer and total_customers == 0 and d.cashier_present:
-            if d.is_machine_counting or d.tray_motion_score > 4000.0:
-                if self.client_left_time is None:
-                    self.client_left_time = d.timecode
-                    self.client_left_timestamp = d.timecode
-                elif d.timecode - self.client_left_time >= 2.0:
-                    activity_str = (
-                        "работа счетной машинки"
-                        if d.is_machine_counting
-                        else f"активность лотка {d.tray_motion_score:.0f}"
-                    )
-                    violations.append(
-                        ComplianceViolation(
-                            timecode=d.timecode,
-                            type="COUNTING_WITHOUT_CLIENT",
-                            law=LAW_COUNTING_WITHOUT_CLIENT,
-                            desc=(
-                                "Клиент покинул кассовую кабину до завершения пересчета "
-                                f"внесенных денег ({activity_str})"
-                            ),
-                            severity="CRITICAL",
-                        )
-                    )
+        # 2. Клиент покинул кассовое помещение / пересчет денег в отсутствие клиента (п. 20)
+        # Срабатывает ТОЛЬКО если клиент реально был в сессии, но ушел до завершения операции
+        client_absent = (
+            not d.customer_at_desk
+            if d.customer_at_desk is not None
+            else (total_customers == 0)
+        )
+        if (
+            (self.ever_seen_customer or self.transaction_active)
+            and client_absent
+            and d.cashier_present
+            and not self.safe_deposit_completed
+        ):
+            if self.client_left_time is None:
+                self.client_left_time = d.timecode
+                self.client_left_timestamp = d.timecode
             else:
+                elapsed_left = d.timecode - self.client_left_time
+                if elapsed_left >= 1.5:
+                    self.client_left_premises = True
+                    # Если счетная машинка или лоток активны (пересчет в отсутствие клиента):
+                    is_active_counting = d.is_machine_counting or d.tray_motion_score > 4000.0
+                    if is_active_counting and elapsed_left >= 2.0:
+                        activity_str = (
+                            "работа счетной машинки"
+                            if d.is_machine_counting
+                            else f"активность лотка {d.tray_motion_score:.0f}"
+                        )
+                        violations.append(
+                            ComplianceViolation(
+                                timecode=d.timecode,
+                                type="COUNTING_WITHOUT_CLIENT",
+                                law=LAW_COUNTING_WITHOUT_CLIENT,
+                                desc=(
+                                    "Клиент покинул кассовую кабину до завершения пересчета "
+                                    f"внесенных денег ({activity_str})"
+                                ),
+                                severity="CRITICAL",
+                            )
+                        )
+                    # Если деньги просто оставлены на столе / кассир не убрала их в сейф:
+                    elif not (d.is_machine_counting or d.tray_motion_score > 4000.0):
+                        violations.append(
+                            ComplianceViolation(
+                                timecode=d.timecode,
+                                type="ERR_CLIENT_ABSENT",
+                                law=LAW_CLIENT_ABSENT,
+                                desc=(
+                                    "Клиент покинул кассовое помещение до окончания операции "
+                                    "/ деньги оставлены на столе"
+                                ),
+                                severity="CRITICAL",
+                            )
+                        )
+        else:
+            if not client_absent:
                 self.client_left_time = None
                 self.client_left_timestamp = None
-        else:
-            self.client_left_time = None
-            self.client_left_timestamp = None
+                self.client_left_premises = False
 
         # 3. Логика FSM для кейса "Пересчет -> Возврат части" (п. 19 пп. 6, п. 20 Правил № 231):
         if self.machine_counted_in_session and self.returned_part_to_client:
@@ -734,6 +767,7 @@ __all__ = [
     "COUNTING_MACHINE_RECT",
     "FORBIDDEN_COCO_OBJECTS",
     "LAW_CASHIER_ABSENT",
+    "LAW_CLIENT_ABSENT",
     "LAW_COUNTING_WITHOUT_CLIENT",
     "LAW_ID_CHECK",
     "LAW_NO_DOC_CONFIRMATION",
@@ -752,6 +786,7 @@ __all__ = [
     "classify_person_strict",
     "filter_reflection_and_assign_roles",
     "get_person_display_attributes",
+    "is_customer_at_desk",
     "is_machine_counting",
     "is_real_phone_violation",
     "should_trigger_id_verification",
