@@ -1,13 +1,29 @@
-export function formatDate(value: string | Date) {
-  return new Date(value).toLocaleString('ru-RU', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+/**
+ * Утилиты форматирования для ForteWatch
+ */
+
+export function formatTimecode(seconds: number): string {
+  if (isNaN(seconds) || seconds < 0) return '00:00'
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.floor(seconds % 60)
+  const ms = Math.floor((seconds % 1) * 10)
+
+  const minStr = mins.toString().padStart(2, '0')
+  const secStr = secs.toString().padStart(2, '0')
+
+  return `${minStr}:${secStr}.${ms}`
 }
 
-export function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+export function formatSecondsShort(seconds: number): string {
+  if (isNaN(seconds) || seconds < 0) return '0 сек'
+  return `${seconds.toFixed(1)} сек`
 }
 
-export function cx(...classes: (string | false | null | undefined)[]) {
-  return classes.filter(Boolean).join(' ')
+export function formatBytes(bytes: number, decimals = 1): string {
+  if (bytes === 0) return '0 Б'
+  const k = 1024
+  const dm = decimals < 0 ? 0 : decimals
+  const sizes = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`
 }

@@ -1,65 +1,63 @@
-export type ItemStatus = 'todo' | 'in_progress' | 'done'
+/**
+/**
+ * Типы данных системы ForteWatch согласно ТЗ Datathon 26
+ */
 
-export interface Item {
-  id: number
-  title: string
+export interface EvidenceFrame {
+  timestamp_sec: number
+  image_base64: string
+}
+
+export interface Violation {
+  type: string
+  timecode_sec: number
   description: string
-  status: ItemStatus
-  created_at: string
-  updated_at: string
+  rule?: string
+  normative_source?: string
+  confidence?: number
+  motion_score?: number
+  evidence_frames: EvidenceFrame[]
 }
 
-export interface ItemCreate {
-  title: string
-  description?: string
-  status?: ItemStatus
+export type Verdict = 'violation' | 'no_violation'
+export type JobStatus = 'processing' | 'done' | 'failed' | 'queued'
+
+export interface AnalysisResponse {
+  job_id: string
+  status: JobStatus
+  verdict?: Verdict
+  violations?: Violation[]
+  // Совместимость с дополнительными полями воркера бэкенда
+  anomalies?: any[]
+  total_duration_sec?: number
+  processing_time_sec?: number
+  processed_segments_count?: number
+  error?: string
+  video_path?: string
+  raw_response?: any
 }
 
-export interface ItemUpdate {
-  title?: string
-  description?: string
-  status?: ItemStatus
-}
-
-export interface MetaFeatures {
-  auth: boolean
-  uploads: boolean
-  ai: boolean
-}
-
-export interface AppMeta {
+export interface BackendMeta {
   app_name: string
   environment: string
-  features: MetaFeatures
+  features?: {
+    auth?: boolean
+    uploads?: boolean
+    ai?: boolean
+  }
+  status?: string
 }
 
-export interface User {
-  id: number
-  email: string
-  name: string
+export interface AnalysisJobInit {
+  job_id: string
+  status?: JobStatus
+  message?: string
 }
 
-export interface TokenResponse {
-  access_token: string
-  token_type: string
-  user: User
-}
-
-export interface UploadFileItem {
-  name: string
-  url: string
-  size: number
-  content_type: string
-  created_at: string
-}
-
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant'
-  content: string
-}
-
-export interface ChatResponse {
-  reply: string
-  model: string
-  mock: boolean
+export interface StandardRuleInfo {
+  typeMatch: string
+  ruleTitle: string
+  documentName: string
+  clause: string
+  explanation: string
 }
