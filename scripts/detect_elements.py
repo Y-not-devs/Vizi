@@ -52,6 +52,7 @@ from app.features.ai.compliance_fsm import (
     SessionType,
     VLMComplianceJudge,
     filter_reflection_and_assign_roles,
+    is_customer_at_desk,
     is_real_phone_violation,
     should_trigger_id_verification,
 )
@@ -142,7 +143,14 @@ class BankComplianceAuditor:
             classified_people = filter_reflection_and_assign_roles(person_boxes, (h, w))
 
             cashier_present = any(p.role == "CASHIER" for p in classified_people)
-            customer_count = sum(1 for p in classified_people if p.role == "CUSTOMER")
+            customer_at_desk = any(
+                p.role == "CUSTOMER" and is_customer_at_desk(p.box, (h, w))
+                for p in classified_people
+            )
+            customer_count = sum(
+                1 for p in classified_people
+                if p.role == "CUSTOMER" and is_customer_at_desk(p.box, (h, w))
+            )
             visitor_in_room_count = sum(
                 1 for p in classified_people
                 if p.role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM", "UNAUTHORIZED_ACCESS")
@@ -177,6 +185,7 @@ class BankComplianceAuditor:
                 timecode=timecode,
                 cashier_present=cashier_present,
                 customer_count=customer_count,
+                customer_at_desk=customer_at_desk,
                 visitor_in_room_count=visitor_in_room_count,
                 tray_motion_score=motion_score,
                 detected_objects=detected_forbidden_names,

@@ -22,10 +22,38 @@ COLOR_VIOLATION: Final[tuple[int, int, int]] = (0, 0, 255)           # Крас�
 COLOR_REFLECTION: Final[tuple[int, int, int]] = (130, 130, 130)      # Приглушенный серый
 
 
+def is_customer_at_desk(
+    person_box: list[int] | tuple[int, int, int, int],
+    frame_shape: tuple[int, int] | list[int],
+    min_bottom_y: float = 0.45,
+) -> bool:
+    """Проверяет, находится ли клиент в секторе обслуживания за столом (п. 20).
+
+    Человек считается присутствующим клиентом (customer_present = True)
+    только пока он находится в секторе взаимодействия за столом:
+    - Зона выхода / коридора: ушел влево к стеклянной двери (cx < 0.35) -> False
+    - Зона в глубине коридора (bottom_y < min_bottom_y) -> False
+    - Зона за столом напротив кассира или сбоку (cx >= 0.35, bottom_y >= min_bottom_y) -> True
+    """
+    h, w = frame_shape[:2]
+    x1, y1, x2, y2 = person_box
+    cx = ((x1 + x2) / 2.0) / float(w)
+    bottom_y = float(y2) / float(h)
+
+    # Зона выхода / коридора: ушел влево к стеклянной двери
+    if cx < 0.35:
+        return False  # Клиент покинул рабочее место кассира
+
+    # Зона за столом напротив кассира или сбоку
+    return bottom_y >= min_bottom_y
+
+
 def get_person_display_attributes(
     role: str,
     session_context: dict[str, Any],
     confidence: float | None = None,
+    person_box: list[int] | tuple[int, int, int, int] | None = None,
+    frame_shape: tuple[int, int] | list[int] | None = None,
 ) -> tuple[str, tuple[int, int, int]]:
     """Возвращает текст метки и цвет рамки (Dynamic State Promotion).
 
@@ -33,27 +61,46 @@ def get_person_display_attributes(
     1. Секунда 0–3: Человек только подошел -> [PENDING: VISITOR] (желтый/янтарный).
     2. Взаимодействие в лотке: [CLIENT: IDENTIFYING...] (желтый/янтарный).
     3. Секунда 4+: Документы верифицированы VLM -> [CLIENT: VERIFIED] (зеленый).
-    4. Красный цвет остается только для реальных нарушений:
+    4. Красный цвет остается для нарушений:
        - customer_count > 1 (второй клиент при уже обслуживаемом клиенте, п. 14).
-       - активное неразрешенное нарушение.
+       - клиент покинул рабочее место до закрытия операции -> [!] CLIENT LEFT PREMISES.
     """
     is_id_verified = session_context.get("id_verified", False)
     is_operation_active = session_context.get("operation_active", False)
+    client_left_premises = (
+        session_context.get("client_left_premises", False)
+        or (role == "CLIENT_LEFT")
+    )
+
+    at_desk = True
+    if person_box is not None and frame_shape is not None:
+        at_desk = is_customer_at_desk(person_box, frame_shape)
+    elif role == "CLIENT_LEFT":
+        at_desk = False
 
     if role == "CASHIER":
         label, color = "[CASHIER]", COLOR_CASHIER
     elif role in (
         "CUSTOMER",
+        "CLIENT_LEFT",
         "VISITOR_IN_CASH_ROOM",
         "UNAUTHORIZED_ACCESS",
         "UNAUTHORIZED_IN_CASH_ROOM",
     ):
+        # 1. Если клиент ушел от стола в коридор/к двери во время активной сессии:
+        if not at_desk and (
+            client_left_premises or session_context.get("client_left_time") is not None
+        ):
+            label, color = "[!] CLIENT LEFT PREMISES", COLOR_VIOLATION
         # Если человек действительно чужой (например, второй клиент при первом активном):
-        if session_context.get("customer_count", 0) > 1:
+        elif session_context.get("customer_count", 0) > 1 and at_desk:
             label, color = "[!] UNAUTHORIZED PERSON", COLOR_VIOLATION
-        # Если документы проверены ИЛИ сессия обслуживания штатно открыта:
-        elif is_id_verified or is_operation_active:
+        # Если документы проверены ИЛИ сессия обслуживания штатно открыта, и клиент за столом:
+        elif at_desk and (is_id_verified or is_operation_active):
             label, color = "[CLIENT: VERIFIED]", COLOR_CLIENT_VERIFIED
+        # Клиент ушел из клиентской зоны (не за столом)
+        elif not at_desk:
+            label, color = "[!] CLIENT LEFT PREMISES", COLOR_VIOLATION
         # Если операция еще не подтверждена, но идет взаимодействие:
         elif session_context.get("tray_active", False):
             label, color = "[CLIENT: IDENTIFYING...]", COLOR_PENDING
@@ -225,8 +272,9 @@ class AdaptiveCashierTopology:
 
             # Створ обслуживания между счетчиком слева и сейфом справа
             in_desk_sector = (self.counter_pos[0] - 0.05) <= cx <= (self.safe_pos[0] + 0.20)
+            at_desk = is_customer_at_desk(cand["box"], frame_shape)
 
-            if is_across_table and in_desk_sector and bottom_y >= 0.44:
+            if is_across_table and in_desk_sector and at_desk:
                 # ЧЕЛОВЕК НАПРОТИВ КАССИРА МЕЖДУ СЧЕТЧИКОМ И СЕЙФОМ = КЛИЕНТ
                 classified.append({
                     "role": "CUSTOMER",
@@ -238,8 +286,8 @@ class AdaptiveCashierTopology:
                     "area": cand["area"],
                 })
 
-            elif cx < (self.counter_pos[0] - 0.02) and bottom_y >= 0.44:
-                # ЧЕЛОВЕК СЛЕВА ОТ СЧЕТЧИКА В ПРОХОДЕ К ДВЕРИ = ПОСТОРОННИЙ В КОНТУРЕ
+            elif cx < 0.35 and bottom_y >= 0.44:
+                # ЧЕЛОВЕК СЛЕВА В ПРОХОДЕ К ДВЕРИ = ПОСТОРОННИЙ В КОНТУРЕ
                 classified.append({
                     "role": "UNAUTHORIZED_IN_CASH_ROOM",
                     "box": cand["box"],
@@ -285,4 +333,5 @@ __all__ = [
     "COLOR_REFLECTION",
     "AdaptiveCashierTopology",
     "get_person_display_attributes",
+    "is_customer_at_desk",
 ]
