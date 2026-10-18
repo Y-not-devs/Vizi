@@ -233,6 +233,34 @@ class ComplianceViolation:
         }
 
 
+def should_trigger_id_verification(
+    cashier_present: bool,
+    customer_present: bool,
+    tray_motion_score: float,
+    id_already_verified: bool,
+    motion_threshold: float = 4000.0,
+) -> bool:
+    """Фильтр оптимизации FSM перед обращением к Ollama / VLM (п. 19 пп. 1 Правил № 231).
+
+    Нет субъектов взаимодействия — нет транзакции. Процедура идентификации
+    физически возможна только тогда, когда в кадре одновременно присутствуют
+    и кассир, и клиент, а в зоне лотка зафиксирован реальный физический контакт.
+    """
+    # 1. Если проверка уже пройдена в этой сессии — повторно не опрашиваем VLM
+    if id_already_verified:
+        return False
+
+    # 2. ЖЕСТКИЙ БЛОК: если нет пары 'кассир + клиент', передачи документов быть не может
+    if not (cashier_present and customer_present):
+        return False
+
+    # 3. Вызываем VLM только в момент реального контакта с лотком
+    if tray_motion_score > motion_threshold:
+        return True
+
+    return False
+
+
 class BankComplianceFSM:
     """Сценарный автомат (FSM) контроля нормативной базы Правил № 231."""
 
@@ -316,7 +344,16 @@ class BankComplianceFSM:
             )
 
         # Регистрация момента первого контакта с лотком (кандидат для VLM)
-        if d.tray_motion_score > 3000.0 and self.first_exchange_contact_time is None:
+        # Блокируется, если нет пары 'кассир + клиент' (п. 19 пп. 1 Правил № 231)
+        if (
+            self.first_exchange_contact_time is None
+            and should_trigger_id_verification(
+                cashier_present=d.cashier_present,
+                customer_present=(d.customer_count > 0),
+                tray_motion_score=d.tray_motion_score,
+                id_already_verified=False,
+            )
+        ):
             self.first_exchange_contact_time = d.timecode
 
         return violations

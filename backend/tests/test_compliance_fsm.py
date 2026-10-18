@@ -5,6 +5,7 @@ from app.features.ai.compliance_fsm import (
     BankDeskZones,
     FrameDetections,
     VLMComplianceJudge,
+    should_trigger_id_verification,
 )
 
 
@@ -169,3 +170,46 @@ def test_vlm_judge_fallback() -> None:
     assert "id_presented" in res
     assert "confidence" in res
     assert isinstance(res["id_presented"], bool)
+
+
+def test_should_trigger_id_verification() -> None:
+    """Проверка оптимизации FSM: опрос VLM строго при наличии пары кассир + клиент."""
+    # 1. Нет кассира
+    assert not should_trigger_id_verification(
+        cashier_present=False,
+        customer_present=True,
+        tray_motion_score=5000.0,
+        id_already_verified=False,
+    )
+
+    # 2. Нет клиента (кассир одна считает деньги / перекладывает бумаги)
+    assert not should_trigger_id_verification(
+        cashier_present=True,
+        customer_present=False,
+        tray_motion_score=8000.0,
+        id_already_verified=False,
+    )
+
+    # 3. Оба есть, но нет контакта с лотком (score ниже порога)
+    assert not should_trigger_id_verification(
+        cashier_present=True,
+        customer_present=True,
+        tray_motion_score=2000.0,
+        id_already_verified=False,
+    )
+
+    # 4. Оба есть, контакт есть, но проверка уже пройдена в сессии
+    assert not should_trigger_id_verification(
+        cashier_present=True,
+        customer_present=True,
+        tray_motion_score=5000.0,
+        id_already_verified=True,
+    )
+
+    # 5. Идеальные условия транзакции: оба на месте + контакт с лотком
+    assert should_trigger_id_verification(
+        cashier_present=True,
+        customer_present=True,
+        tray_motion_score=5000.0,
+        id_already_verified=False,
+    )

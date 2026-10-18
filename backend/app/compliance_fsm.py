@@ -9,6 +9,7 @@ from app.features.ai.compliance_fsm import (
     PersonDetection,
     VLMComplianceJudge,
     filter_reflection_and_assign_roles,
+    should_trigger_id_verification,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "PersonDetection",
     "VLMComplianceJudge",
     "filter_reflection_and_assign_roles",
+    "should_trigger_id_verification",
 ]

@@ -51,6 +51,7 @@ from app.features.ai.compliance_fsm import (
     FrameDetections,
     VLMComplianceJudge,
     filter_reflection_and_assign_roles,
+    should_trigger_id_verification,
 )
 from app.features.ai.motion_extractor import TemporalMotionAnalyzer
 
@@ -174,11 +175,17 @@ class BankComplianceAuditor:
             step_violations = fsm.evaluate_frame(frame_input)
             all_violations.extend(step_violations)
 
-            # Проверка VLM-судьей первого физического контакта (п. 18: проверка удостоверения)
+            # Проверка VLM-судьей (п. 19 пп. 1 Правил № 231: проверка ID-карты)
+            # Опрос VLM физически возможен только при наличии пары "кассир + клиент"
             if (
                 self.vlm_judge
                 and not vlm_checked
-                and fsm.first_exchange_contact_time is not None
+                and should_trigger_id_verification(
+                    cashier_present=cashier_present,
+                    customer_present=(customer_count > 0),
+                    tray_motion_score=motion_score,
+                    id_already_verified=vlm_checked,
+                )
             ):
                 vlm_checked = True
                 vlm_id_verdict = self.vlm_judge.verify_id_presentation(
@@ -282,10 +289,14 @@ def print_legal_verdict(audit: dict[str, Any]) -> None:
     # Вывод вердикта VLM-судьи
     vlm_verdict = audit.get("vlm_id_check")
     if vlm_verdict:
-        print("\n🔍 ВЕРДИКТ VLM-СУДЬИ (Пункт 18 — Проверка документа/ID перед передачей денег):")
+        print("\n🔍 ВЕРДИКТ VLM-СУДЬИ (Пункт 19 пп. 1 — Проверка документа/ID перед передачей денег):")
         status_vlm = "ПОДТВЕРЖДЕНО" if vlm_verdict.get("id_presented") else "НАРУШЕНИЕ"
         print(f"   Статус: [{status_vlm}] (Уверенность: {vlm_verdict.get('confidence', 0.0):.2f})")
         print(f"   Экспертиза VLM: {vlm_verdict.get('details', '—')}")
+    else:
+        print("\n🔍 VLM-СУДЬЯ (Пункт 19 пп. 1 — Проверка документа/ID):")
+        print("   Статус: [ОПТИМИЗАЦИЯ FSM — ОПРОС НЕ ТРЕБУЕТСЯ]")
+        print("   Причина: Нет субъектов взаимодействия (отсутствует пара «кассир + клиент»). 0 вызовов VLM.")
 
     print("=" * 80 + "\n")
 
