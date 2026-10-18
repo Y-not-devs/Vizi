@@ -34,6 +34,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = PROJECT_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
     from ultralytics import YOLO  # type: ignore[import-untyped]
@@ -50,6 +52,8 @@ from app.features.ai.compliance_fsm import (
     VLMComplianceJudge,
 )
 from app.features.ai.motion_extractor import TemporalMotionAnalyzer
+
+from scripts.render_annotated_video import VideoOverlayAnnotator
 
 logging.getLogger("ultralytics").setLevel(logging.WARNING)
 logger = logging.getLogger("fortewatch.compliance_detector")
@@ -138,16 +142,19 @@ class BankComplianceAuditor:
                 cy = ((coords[1] + coords[3]) / 2.0) / float(h)
 
                 if cls_id == CLASS_PERSON and conf >= 0.40:
-                    if self.zones.cashier_zone.contains_point(cx, cy):
+                    box_h_ratio = (coords[3] - coords[1]) / float(h)
+
+                    # Решение 1 + 3: Проверка на отражение в стекле двери (отбрасываем)
+                    if self.zones.is_glass_reflection(cx, cy, box_h_ratio):
+                        continue
+
+                    # Проверка зоны кассира
+                    is_cashier = self.zones.cashier_zone.contains_point(cx, cy)
+                    if is_cashier or (cy >= 0.45 and 0.25 <= cx <= 0.85):
                         cashier_present = True
-                    elif self.zones.customer_zone.contains_point(cx, cy):
+                    # Решение 2 + 3: Валидация реального посетителя в суженной зоне обслуживания
+                    elif self.zones.is_valid_customer(cx, cy, box_h_ratio):
                         customer_count += 1
-                    else:
-                        # Если человек вне строгих границ, относим по вертикальной/горизонтальной оси
-                        if cy >= 0.50 and cx >= 0.25:
-                            cashier_present = True
-                        else:
-                            customer_count += 1
 
                 elif cls_id in (CLASS_CELL_PHONE, CLASS_CUP, CLASS_BOTTLE) and conf >= 0.35:
                     item_name = self.yolo.names[cls_id]
@@ -312,6 +319,18 @@ def main() -> None:
     )
     parser.add_argument("video", nargs="?", type=Path, default=None)
     parser.add_argument("--no-vlm", action="store_true", help="Отключить опрос VLM-судьи")
+    parser.add_argument(
+        "--no-video",
+        action="store_true",
+        help="Отключить автоматический рендеринг визуального видео (по умолчанию включен)",
+    )
+    parser.add_argument(
+        "--output-video",
+        "-o",
+        type=Path,
+        default=None,
+        help="Путь для сохранения видео (по умолчанию: data/annotated_videos/<stem>_compliance_annotated.mp4)",
+    )
 
     args = parser.parse_args()
     video_path = args.video or find_default_video()
@@ -330,6 +349,22 @@ def main() -> None:
 
     # 2. Юридически обоснованный вердикт со статьями НПА РК
     print_legal_verdict(audit_result)
+
+    # 3. ВСЕГДА генерируем визуализированное видео для жюри и службы безопасности
+    if not args.no_video:
+        output_dir = PROJECT_ROOT / "data" / "annotated_videos"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_video_path = args.output_video or (
+            output_dir / f"{video_path.stem}_compliance_annotated.mp4"
+        )
+        print(f"[🎬] Генерация аннотированного видео с HUD и зонами: {out_video_path.name}...")
+        annotator = VideoOverlayAnnotator(zones=auditor.zones)
+        annotator.render(video_path, out_video_path)
+
+        print("\n" + "=" * 80)
+        print("🎥 АННОТИРОВАННОЕ ВИДЕО С ПОЛНОЙ ВИЗУАЛИЗАЦИЕЙ УСПЕШНО СОХРАНЕНО:")
+        print(f"   Файл: {out_video_path.resolve()}")
+        print("=" * 80 + "\n")
 
 
 if __name__ == "__main__":

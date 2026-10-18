@@ -64,8 +64,10 @@ COLOR_WARN_BG: Final[tuple[int, int, int]] = (10, 140, 240)     # Оранжев
 COLOR_CASH_BG: Final[tuple[int, int, int]] = (180, 130, 20)     # Золотистый
 
 # Цвета статических зон
-COLOR_ZONE_CASHIER: Final[tuple[int, int, int]] = (220, 120, 30)  # Сине-голубой
-COLOR_ZONE_CUSTOMER: Final[tuple[int, int, int]] = (30, 180, 220) # Желто-оранжевый
+COLOR_ZONE_CASHIER: Final[tuple[int, int, int]] = (220, 120, 30)   # Сине-голубой
+COLOR_ZONE_CUSTOMER: Final[tuple[int, int, int]] = (30, 180, 220)  # Желто-оранжевый
+COLOR_ZONE_EXCLUSION: Final[tuple[int, int, int]] = (150, 100, 170) # Фиолетово-серый (Exclusion)
+COLOR_REFLECTION: Final[tuple[int, int, int]] = (130, 130, 130)    # Приглушенный серый (Отражение)
 
 CLASS_PERSON: Final[int] = 0
 CLASS_BOTTLE: Final[int] = 39
@@ -409,13 +411,33 @@ class VideoOverlayAnnotator:
                     cy = ((coords[1] + coords[3]) / 2.0) / float(height)
 
                     if cls_id == CLASS_PERSON and conf >= 0.40:
+                        box_h_ratio = (coords[3] - coords[1]) / float(height)
+
+                        # Решение 1 + 3: Обнаружение отражения в стекле двери
+                        if self.zones.is_glass_reflection(cx, cy, box_h_ratio):
+                            current_boxes.append(
+                                DetectedBox(
+                                    x_min=coords[0],
+                                    y_min=coords[1],
+                                    x_max=coords[2],
+                                    y_max=coords[3],
+                                    label=f"[REFLECT: GLASS] {conf:.2f}",
+                                    confidence=conf,
+                                    color=COLOR_REFLECTION,
+                                    is_alert=False,
+                                )
+                            )
+                            continue
+
                         is_cashier = self.zones.cashier_zone.contains_point(cx, cy)
-                        if is_cashier or (cy >= 0.50 and cx >= 0.25):
+                        if is_cashier or (cy >= 0.45 and 0.25 <= cx <= 0.85):
                             cashier_present = True
                             role_label = f"CASHIER: {conf:.2f}"
-                        else:
+                        elif self.zones.is_valid_customer(cx, cy, box_h_ratio):
                             customer_count += 1
                             role_label = f"CUSTOMER: {conf:.2f}"
+                        else:
+                            continue
 
                         current_boxes.append(
                             DetectedBox(
@@ -478,6 +500,12 @@ class VideoOverlayAnnotator:
             # 1. Статические нормативные зоны
             draw_static_zone(draw_frame, self.zones.cashier_zone, COLOR_ZONE_CASHIER, "CASHIER DESK")
             draw_static_zone(draw_frame, self.zones.customer_zone, COLOR_ZONE_CUSTOMER, "CUSTOMER AREA")
+            draw_static_zone(
+                draw_frame,
+                self.zones.glass_door_exclusion,
+                COLOR_ZONE_EXCLUSION,
+                "GLASS DOOR (EXCLUSION)",
+            )
 
             # 2. Зона лотка пересчета (Dynamic ROI)
             if current_roi_bbox is not None:

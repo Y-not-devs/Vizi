@@ -138,9 +138,27 @@ def test_zone_definitions() -> None:
     assert zones.cashier_zone.contains_point(0.50, 0.60)
     assert not zones.customer_zone.contains_point(0.50, 0.60)
 
-    # Клиентская сторона
-    assert zones.customer_zone.contains_point(0.15, 0.30)
-    assert not zones.cashier_zone.contains_point(0.15, 0.30)
+    # Клиентская сторона перед стойкой
+    assert zones.customer_zone.contains_point(0.60, 0.40)
+    assert not zones.cashier_zone.contains_point(0.60, 0.40)
+
+
+def test_anti_reflection_solutions() -> None:
+    """Проверка всех 3 решений фильтрации отражений в стекле двери."""
+    zones = BankDeskZones()
+
+    # 1. Решение 1 (Маска исключения): точка в створе стеклянной двери
+    assert zones.is_glass_reflection(0.15, 0.30, box_h_ratio=0.45)
+    assert not zones.is_valid_customer(0.15, 0.30, box_h_ratio=0.45)
+
+    # 2. Решение 3 (Фильтр высоты): мелкий объект вдалеке слева
+    assert zones.is_glass_reflection(0.25, 0.25, box_h_ratio=0.15)
+    assert not zones.is_valid_customer(0.25, 0.25, box_h_ratio=0.15)
+
+    # 3. Решение 2 (Суженная клиентская зона): реальный посетитель перед кассовым окном
+    # Высота достаточная (0.45), координаты перед лотком (0.65, 0.45)
+    assert not zones.is_glass_reflection(0.65, 0.45, box_h_ratio=0.45)
+    assert zones.is_valid_customer(0.65, 0.45, box_h_ratio=0.45)
 
 
 def test_vlm_judge_fallback() -> None:
