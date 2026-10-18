@@ -271,6 +271,7 @@ class FrameDetections:
     detected_objects: list[str]        # обнаруженные объекты ['cell phone', 'bottle', 'cup']
     visitor_in_room_count: int = 0     # количество посторонних в служебной зоне кассы
     is_machine_counting: bool = False  # активность купюросчетной машинки
+    safe_deposit_completed: bool = False  # деньги убраны в сейф/тумбу (п. 19/20)
     full_frame_b64: str | None = None
     crop_b64: str | None = None
 
@@ -342,30 +343,73 @@ class BankComplianceFSM:
 
     def __init__(self) -> None:
         self.session_mode: str | None = None
+        self.transaction_active: bool = False
         self.ever_seen_customer: bool = False
+        self.client_was_present: bool = False
+        self.has_had_customer_session: bool = False
+        self.safe_deposit_completed: bool = False
         self.customer_first_seen_time: float | None = None
         self.client_left_time: float | None = None
+        self.client_left_timestamp: float | None = None
         self.cashier_left_time: float | None = None
         self.cashier_abandoned_time: float | None = None
         self.id_verified: bool = False
         self.first_exchange_contact_time: float | None = None
 
+    def close_session(self) -> None:
+        """Штатное закрытие сессии обслуживания (TRANSACTION_ACTIVE -> IDLE/CLOSED).
+
+        Согласно п. 19 и п. 20 Правил № 231 НБ РК:
+        - Пересчет и сверка завершены;
+        - Деньги убраны в сейф/тумбу;
+        - Клиент покинул кассовый узел.
+        Сброс FSM в исходное состояние предотвращает ложные срабатывания
+        COUNTING_WITHOUT_CLIENT и CASHIER_ABSENT при последующей работе кассира.
+        """
+        self.transaction_active = False
+        self.session_mode = None
+        self.client_was_present = False
+        self.ever_seen_customer = False
+        self.id_verified = False
+        self.safe_deposit_completed = False
+        self.client_left_time = None
+        self.client_left_timestamp = None
+        self.first_exchange_contact_time = None
+        self.customer_first_seen_time = None
+
     def update_session_mode(self, customer_present: bool, timecode: float) -> None:
         """Классифицирует режим сессии по наличию клиента в кадре."""
         if customer_present:
             self.ever_seen_customer = True
+            self.client_was_present = True
+            self.has_had_customer_session = True
             if self.session_mode != SessionType.CUSTOMER_SESSION:
                 self.session_mode = SessionType.CUSTOMER_SESSION
+                self.transaction_active = True
                 if self.customer_first_seen_time is None:
                     self.customer_first_seen_time = timecode
 
-        # Если прошло более 3 секунд, а клиента ни разу не было — это внутренняя работа / инкассация
-        if not self.ever_seen_customer and timecode >= 3.0 and self.session_mode is None:
+        # Если с начала смены/видео прошло >= 3с, а клиента ни разу не было — это внутренняя работа
+        if (
+            not self.has_had_customer_session
+            and not self.ever_seen_customer
+            and timecode >= 3.0
+            and self.session_mode is None
+        ):
             self.session_mode = SessionType.INTERNAL_OPERATION
 
     def evaluate_frame(self, d: FrameDetections) -> list[ComplianceViolation]:
         """Оценка кадра по нормативным статьям с учетом контекста сессии."""
         customer_present = (d.customer_count > 0) or (d.visitor_in_room_count > 0)
+
+        # Фиксация факта уборки денег в сейф
+        if d.safe_deposit_completed:
+            self.safe_deposit_completed = True
+
+        # Если деньги убраны в сейф и клиент вышел — штатный переход в IDLE / SESSION_CLOSED
+        if self.safe_deposit_completed and not customer_present:
+            self.close_session()
+
         self.update_session_mode(customer_present, d.timecode)
         violations: list[ComplianceViolation] = []
 
@@ -401,21 +445,30 @@ class BankComplianceFSM:
 
         # 2. Оставление рабочего места кассиром (п. 22 Правил № 231)
         if not d.cashier_present:
-            if self.cashier_left_time is None:
-                self.cashier_left_time = d.timecode
-            elif d.timecode - self.cashier_left_time >= 3.0:
-                violations.append(
-                    ComplianceViolation(
-                        timecode=d.timecode,
-                        type="CASHIER_ABSENT",
-                        law=LAW_CASHIER_ABSENT,
-                        desc=(
-                            f"Кассир покинул рабочее место во время операционного дня "
-                            f"(отсутствует {d.timecode - self.cashier_left_time:.1f} сек.)"
-                        ),
-                        severity="HIGH",
+            is_active_session = (
+                self.session_mode == SessionType.CUSTOMER_SESSION
+                or self.transaction_active
+                or customer_present
+                or d.tray_motion_score > 3000.0
+            )
+            if is_active_session:
+                if self.cashier_left_time is None:
+                    self.cashier_left_time = d.timecode
+                elif d.timecode - self.cashier_left_time >= 3.0:
+                    violations.append(
+                        ComplianceViolation(
+                            timecode=d.timecode,
+                            type="CASHIER_ABSENT",
+                            law=LAW_CASHIER_ABSENT,
+                            desc=(
+                                f"Кассир покинул рабочее место во время обслуживания "
+                                f"(отсутствует {d.timecode - self.cashier_left_time:.1f} сек.)"
+                            ),
+                            severity="HIGH",
+                        )
                     )
-                )
+            else:
+                self.cashier_left_time = None
         else:
             self.cashier_left_time = None
 
@@ -478,6 +531,7 @@ class BankComplianceFSM:
             if d.is_machine_counting or d.tray_motion_score > 4000.0:
                 if self.client_left_time is None:
                     self.client_left_time = d.timecode
+                    self.client_left_timestamp = d.timecode
                 elif d.timecode - self.client_left_time >= 2.0:
                     activity_str = (
                         "работа счетной машинки"
@@ -498,8 +552,10 @@ class BankComplianceFSM:
                     )
             else:
                 self.client_left_time = None
+                self.client_left_timestamp = None
         else:
             self.client_left_time = None
+            self.client_left_timestamp = None
 
         # Регистрация момента первого контакта с лотком (кандидат для VLM)
         # Блокируется, если нет пары 'кассир + клиент' (п. 19 пп. 1 Правил № 231)

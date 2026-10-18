@@ -643,6 +643,46 @@ class VideoOverlayAnnotator:
         return out_path
 
 
+def resolve_video_path(path_arg: Path | str | None) -> Path | None:
+    """Интеллектуальное разрешение пути к видеофайлу с поддержкой кириллицы/латиницы и нумерации."""
+    candidates = [
+        PROJECT_ROOT / "data" / "test_videos" / "Х-13.mov",
+        PROJECT_ROOT / "data" / "test_videos" / "Х-14.mov",
+        PROJECT_ROOT / "data" / "test_videos" / "X-1.mov",
+    ]
+    if path_arg is None:
+        for c in candidates:
+            if c.is_file():
+                return c
+        return None
+
+    path = Path(path_arg)
+    if path.is_file():
+        return path
+
+    test_videos_dir = PROJECT_ROOT / "data" / "test_videos"
+    if not test_videos_dir.exists():
+        return None
+
+    # Нормализация для нечувствительности к кириллице 'Х' vs латинице 'X' и ведущим нулям (Х-01 -> X-1)
+    def normalize_stem(stem: str) -> str:
+        s = stem.replace("Х", "X").replace("х", "x").upper().strip()
+        parts = s.split("-")
+        if len(parts) == 2 and parts[1].isdigit():
+            return f"{parts[0]}-{int(parts[1])}"
+        return s
+
+    norm_target = normalize_stem(path.stem)
+
+    for f in sorted(test_videos_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if normalize_stem(f.stem) == norm_target:
+            return f
+
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="ForteWatch: Рендеринг нормативного видео с зонами, HUD и статьями Правил № 231."
@@ -651,20 +691,10 @@ def main() -> None:
     parser.add_argument("--output", "-o", type=Path, default=None)
 
     args = parser.parse_args()
-
-    input_path: Path | None = args.video
-    if input_path is None:
-        candidates = [
-            PROJECT_ROOT / "data" / "test_videos" / "Х-13.mov",
-            PROJECT_ROOT / "data" / "test_videos" / "X-1.mov",
-        ]
-        for c in candidates:
-            if c.is_file():
-                input_path = c
-                break
+    input_path = resolve_video_path(args.video)
 
     if input_path is None or not input_path.is_file():
-        print("[-] Ошибка: Исходный видеофайл не найден!")
+        print(f"[-] Ошибка: Исходный видеофайл не найден: {args.video}!")
         sys.exit(1)
 
     output_dir = PROJECT_ROOT / "data" / "annotated_videos"

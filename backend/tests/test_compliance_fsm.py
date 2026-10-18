@@ -491,3 +491,117 @@ def test_dynamic_state_promotion() -> None:
     assert label_conf == "[CASHIER] 0.94"
 
 
+def test_safe_deposit_and_session_closing() -> None:
+    """Проверка п. 19 и 20: штатное закрытие сессии (TRANSACTION_ACTIVE -> IDLE/CLOSED)."""
+    fsm = BankComplianceFSM()
+
+    # 1. Приход клиента: открывается клиентская сессия
+    v0 = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=1.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v0) == 0
+    assert fsm.session_mode == SessionType.CUSTOMER_SESSION
+    assert fsm.transaction_active is True
+    assert fsm.client_was_present is True
+
+    # 2. Передача документов и денег, ID верифицирован
+    fsm.id_verified = True
+    fsm.evaluate_frame(
+        FrameDetections(
+            timecode=5.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=5000.0,
+            detected_objects=[],
+        )
+    )
+
+    # 3. Деньги пересчитаны и убраны в сейф/тумбу (safe_deposit_completed=True)
+    v_deposit = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=10.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=500.0,
+            detected_objects=[],
+            safe_deposit_completed=True,
+        )
+    )
+    assert len(v_deposit) == 0
+    assert fsm.safe_deposit_completed is True
+
+    # 4. Клиент покидает кассовый узел -> FSM переходит в IDLE / SESSION_CLOSED
+    v_leave = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=12.0,
+            cashier_present=True,
+            customer_count=0,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v_leave) == 0
+    assert fsm.transaction_active is False
+    assert fsm.session_mode is None
+    assert fsm.client_was_present is False
+    assert fsm.ever_seen_customer is False
+    assert fsm.id_verified is False
+    assert fsm.client_left_timestamp is None
+    assert fsm.client_left_time is None
+
+    # 5. Проверка отсутствия ложного COUNTING_WITHOUT_CLIENT при работе со счетной машинкой
+    v_counting = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=15.0,
+            cashier_present=True,
+            customer_count=0,
+            tray_motion_score=6000.0,
+            is_machine_counting=True,
+            detected_objects=[],
+        )
+    )
+    assert len(v_counting) == 0
+
+    # 6. Проверка отсутствия ложного CASHIER_ABSENT при уходе кассира после закрытия сессии
+    fsm.evaluate_frame(
+        FrameDetections(
+            timecode=20.0,
+            cashier_present=False,
+            customer_count=0,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    v_absent = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=25.0,  # прошло 5 сек отсутствия при закрытой сессии
+            cashier_present=False,
+            customer_count=0,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v_absent) == 0
+
+    # 7. Приход нового клиента (новый цикл)
+    v_new_client = fsm.evaluate_frame(
+        FrameDetections(
+            timecode=30.0,
+            cashier_present=True,
+            customer_count=1,
+            tray_motion_score=0.0,
+            detected_objects=[],
+        )
+    )
+    assert len(v_new_client) == 0
+    assert fsm.session_mode == SessionType.CUSTOMER_SESSION
+    assert fsm.transaction_active is True
+
+
+

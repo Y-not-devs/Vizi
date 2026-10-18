@@ -332,16 +332,43 @@ def print_legal_verdict(audit: dict[str, Any]) -> None:
     print("=" * 80 + "\n")
 
 
-def find_default_video() -> Path | None:
-    """Поиск первого видео для аудита."""
+def resolve_video_path(path_arg: Path | str | None) -> Path | None:
+    """Интеллектуальное разрешение пути к видеофайлу с поддержкой кириллицы/латиницы и нумерации."""
     candidates = [
         PROJECT_ROOT / "data" / "test_videos" / "Х-13.mov",
-        PROJECT_ROOT / "data" / "test_videos" / "Х-22.mov",
+        PROJECT_ROOT / "data" / "test_videos" / "Х-14.mov",
         PROJECT_ROOT / "data" / "test_videos" / "X-1.mov",
     ]
-    for c in candidates:
-        if c.is_file():
-            return c
+    if path_arg is None:
+        for c in candidates:
+            if c.is_file():
+                return c
+        return None
+
+    path = Path(path_arg)
+    if path.is_file():
+        return path
+
+    test_videos_dir = PROJECT_ROOT / "data" / "test_videos"
+    if not test_videos_dir.exists():
+        return None
+
+    # Нормализация для нечувствительности к кириллице 'Х' vs латинице 'X' и ведущим нулям (Х-01 -> X-1)
+    def normalize_stem(stem: str) -> str:
+        s = stem.replace("Х", "X").replace("х", "x").upper().strip()
+        parts = s.split("-")
+        if len(parts) == 2 and parts[1].isdigit():
+            return f"{parts[0]}-{int(parts[1])}"
+        return s
+
+    norm_target = normalize_stem(path.stem)
+
+    for f in sorted(test_videos_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if normalize_stem(f.stem) == norm_target:
+            return f
+
     return None
 
 
@@ -365,10 +392,15 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    video_path = args.video or find_default_video()
+    video_path = resolve_video_path(args.video)
 
     if video_path is None or not video_path.is_file():
-        print("[-] Видеофайл не найден для аудита!")
+        print(f"[-] Видеофайл не найден для аудита: {args.video}!")
+        print("    Доступные видео в data/test_videos/:")
+        test_dir = PROJECT_ROOT / "data" / "test_videos"
+        if test_dir.is_dir():
+            files = sorted(f.name for f in test_dir.glob("*.mov"))
+            print(f"    {', '.join(files[:8])}...")
         sys.exit(1)
 
     print(f"\n[+] Запуск аудита кассового узла: {video_path.name}")
