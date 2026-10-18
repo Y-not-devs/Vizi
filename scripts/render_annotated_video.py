@@ -443,7 +443,7 @@ class VideoOverlayAnnotator:
                                 is_alert=False,
                             )
                         )
-                    elif p.role == "VISITOR_IN_CASH_ROOM":
+                    elif p.role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM", "UNAUTHORIZED_ACCESS"):
                         visitor_in_room_count += 1
                         current_boxes.append(
                             DetectedBox(

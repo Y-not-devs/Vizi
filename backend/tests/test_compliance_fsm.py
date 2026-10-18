@@ -2,6 +2,7 @@
 
 from app.features.ai.compliance_fsm import (
     LAW_UNAUTHORIZED_ACCESS_ROOM,
+    AdaptiveCashierTopology,
     BankComplianceFSM,
     BankDeskZones,
     FrameDetections,
@@ -329,7 +330,7 @@ def test_classify_person_strict() -> None:
     persons = filter_reflection_and_assign_roles(boxes_with_conf, frame_shape)
     assert len(persons) == 3
     assert any(p.role == "CASHIER" for p in persons)
-    assert any(p.role == "VISITOR_IN_CASH_ROOM" for p in persons)
+    assert any(p.role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM") for p in persons)
     assert any(p.role in ("REFLECT_GLASS", "REFLECTION") for p in persons)
 
 
@@ -376,4 +377,37 @@ def test_unauthorized_room_access_violation() -> None:
     )
     violations_after = fsm.evaluate_frame(d_verified)
     assert len(violations_after) == 0
+
+
+def test_adaptive_cashier_topology() -> None:
+    """Проверка геометрической модели адаптивной топологии стола и оборудования."""
+    topo = AdaptiveCashierTopology(counter_pos=(0.22, 0.65), safe_pos=(0.58, 0.55))
+    frame_shape = (848, 464)
+
+    # 1. Сцена обслуживания: сидящий кассир (bottom_y=0.68)
+    # и клиент напротив через стол (bottom_y=0.48)
+    boxes = [
+        ([185, 388, 284, 570], 0.85),  # Кассир: cx ~ 0.50, bottom_y = 570/848 = 0.672
+        ([127, 302, 212, 419], 0.88),  # Клиент напротив: cx ~ 0.36, bottom_y = 419/848 = 0.494
+    ]
+    classified = topo.classify_people(boxes, frame_shape)
+    roles = {c["role"] for c in classified}
+    assert "CASHIER" in roles
+    assert "CUSTOMER" in roles
+
+    # 2. Вход в контур слева от счетчика (проход к двери, cx=0.15 < 0.20, bottom_y=0.50)
+    door_visitor_box = ([20, 233, 119, 420], 0.84)
+    classified_door = topo.classify_people([door_visitor_box], frame_shape)
+    assert classified_door[0]["role"] == "UNAUTHORIZED_IN_CASH_ROOM"
+
+    # 3. Клиент у правой стойки (cx=0.78 > safe_pos + 0.15)
+    counter_client_box = ([340, 250, 420, 500], 0.80)
+    classified_counter = topo.classify_people([counter_client_box], frame_shape)
+    assert classified_counter[0]["role"] == "CUSTOMER"
+
+    # 4. Стоящий кассир за столом оборудования в отсутствие сидящего (как в Х-14)
+    standing_cashier_box = ([158, 229, 237, 395], 0.80)  # cx ~ 0.43, bottom_y = 0.466
+    classified_standing = topo.classify_people([standing_cashier_box], frame_shape)
+    assert classified_standing[0]["role"] == "CASHIER"
+
 

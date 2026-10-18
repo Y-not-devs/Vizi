@@ -143,7 +143,10 @@ class BankComplianceAuditor:
 
             cashier_present = any(p.role == "CASHIER" for p in classified_people)
             customer_count = sum(1 for p in classified_people if p.role == "CUSTOMER")
-            visitor_in_room_count = sum(1 for p in classified_people if p.role == "VISITOR_IN_CASH_ROOM")
+            visitor_in_room_count = sum(
+                1 for p in classified_people
+                if p.role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM", "UNAUTHORIZED_ACCESS")
+            )
 
             # 2. Поиск запрещенных предметов с Motion-Gated фильтрацией стационарных приборов
             detected_forbidden_names: list[str] = []

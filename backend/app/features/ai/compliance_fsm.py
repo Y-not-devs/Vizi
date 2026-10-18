@@ -20,6 +20,8 @@ from typing import Any, Final
 import httpx
 import numpy as np
 
+from app.features.ai.adaptive_topology import AdaptiveCashierTopology
+
 try:
     from app.core.config import get_settings
 except ImportError:
@@ -156,80 +158,33 @@ def classify_person_strict(
     return "UNKNOWN"
 
 
+_DEFAULT_TOPOLOGY: Final[AdaptiveCashierTopology] = AdaptiveCashierTopology()
+
+
 def filter_reflection_and_assign_roles(
     boxes_with_conf: list[tuple[list[int], float]],
     frame_shape: tuple[int, int],
+    topology: AdaptiveCashierTopology | None = None,
 ) -> list[PersonDetection]:
     """Разделяет людей на Кассира, Клиента, Посетителя кассы и Игнорируемые Отражения.
 
-    Реализует строгую валидацию по размеру и нижней точке опоры (Ground Contact / Footprint):
-    1. Исключает дубликаты детекций одного человека через Non-Maximum Suppression (IoU > 0.45).
-    2. Исключает отражения в стекле двери (REFLECT_GLASS).
-    3. Привязывает сидящего кассира к креслу перед столом (CASHIER).
-    4. Распознает вошедшего через служебную дверь субъекта (VISITOR_IN_CASH_ROOM).
-    5. Если в кадре нет сидящего кассира (например, кассир стоит за столом в Х-14),
-       субъект в рабочей зоне кассы (0.20 <= cx <= 0.68) назначается CASHIER.
+    Использует адаптивную топологию кассового узла (AdaptiveCashierTopology)
+    на основе базового треугольника оборудования и линии стола (Desk Axis).
     """
-    h_img, w_img = frame_shape[:2]
-
-    # 1. NMS дедупликация пересекающихся рамок одного и того же человека
-    sorted_boxes = sorted(boxes_with_conf, key=lambda x: x[1], reverse=True)
-    kept_boxes: list[tuple[list[int], float]] = []
-    for b, c in sorted_boxes:
-        if c < 0.35:
-            continue
-        is_dup = False
-        for kb, _ in kept_boxes:
-            ix1 = max(b[0], kb[0])
-            iy1 = max(b[1], kb[1])
-            ix2 = min(b[2], kb[2])
-            iy2 = min(b[3], kb[3])
-            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-            a1 = (b[2] - b[0]) * (b[3] - b[1])
-            a2 = (kb[2] - kb[0]) * (kb[3] - kb[1])
-            union = a1 + a2 - inter
-            if union > 0 and (inter / union) > 0.45:
-                is_dup = True
-                break
-        if not is_dup:
-            kept_boxes.append((b, c))
-
-    assigned_persons: list[PersonDetection] = []
-    for box, conf in kept_boxes:
-        x1, y1, x2, y2 = box
-        cx = ((x1 + x2) / 2.0) / float(w_img)
-        cy = ((y1 + y2) / 2.0) / float(h_img)
-        area = ((x2 - x1) * (y2 - y1)) / float(w_img * h_img)
-        bottom_y = float(y2) / float(h_img)
-
-        role = classify_person_strict(box, frame_shape)
-        assigned_persons.append(
-            PersonDetection(
-                role=role,
-                box=box,
-                confidence=conf,
-                area=area,
-                cx=cx,
-                cy=cy,
-                bottom_y=bottom_y,
-            )
+    topo = topology or _DEFAULT_TOPOLOGY
+    raw_results = topo.classify_people(boxes_with_conf, frame_shape)
+    return [
+        PersonDetection(
+            role=item["role"],
+            box=item["box"],
+            confidence=item["conf"],
+            area=item["area"],
+            cx=item["cx"],
+            cy=item["cy"],
+            bottom_y=item["bottom_y"],
         )
-
-    # Корректировка: если сидящего в кресле кассира нет в кадре, но есть кассир,
-    # перемещающийся вдоль стола оборудования (0.20 <= cx <= 0.68, bottom_y >= 0.44)
-    has_seated_cashier = any(p.role == "CASHIER" for p in assigned_persons)
-    if not has_seated_cashier:
-        for p in assigned_persons:
-            is_candidate = (
-                p.role in ("VISITOR_IN_CASH_ROOM", "CUSTOMER", "UNKNOWN")
-                and 0.20 <= p.cx <= 0.68
-                and p.bottom_y >= 0.44
-            )
-            if is_candidate:
-                p.role = "CASHIER"
-                break
-
-    return assigned_persons
+        for item in raw_results
+    ]
 
 
 # Нормализованные координаты купюросчетной машины слева на столе (x1, y1, x2, y2)

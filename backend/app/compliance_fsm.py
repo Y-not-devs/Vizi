@@ -3,6 +3,7 @@
 from app.features.ai.compliance_fsm import (
     COUNTING_MACHINE_RECT,
     LAW_UNAUTHORIZED_ACCESS_ROOM,
+    AdaptiveCashierTopology,
     BankComplianceFSM,
     BankDeskZones,
     ComplianceViolation,
@@ -19,12 +20,13 @@ from app.features.ai.compliance_fsm import (
 )
 
 __all__ = [
-    "LAW_UNAUTHORIZED_ACCESS_ROOM",
+    "AdaptiveCashierTopology",
     "BankComplianceFSM",
     "BankDeskZones",
     "COUNTING_MACHINE_RECT",
     "ComplianceViolation",
     "FrameDetections",
+    "LAW_UNAUTHORIZED_ACCESS_ROOM",
     "NormalizedZone",
     "PersonDetection",
     "SessionType",
