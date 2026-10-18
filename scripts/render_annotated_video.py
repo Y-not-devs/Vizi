@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import sys
 import time
@@ -42,14 +43,19 @@ except ImportError as exc:
     ) from exc
 
 from app.features.ai.compliance_fsm import (
+    COLOR_CLIENT_VERIFIED,
+    COLOR_VIOLATION,
     BankComplianceFSM,
     BankDeskZones,
     ComplianceViolation,
     FrameDetections,
     NormalizedZone,
     SessionType,
+    VLMComplianceJudge,
     filter_reflection_and_assign_roles,
+    get_person_display_attributes,
     is_real_phone_violation,
+    should_trigger_id_verification,
 )
 from app.features.ai.motion_extractor import BoundingBox, TemporalMotionAnalyzer
 
@@ -70,7 +76,6 @@ COLOR_CASH_BG: Final[tuple[int, int, int]] = (180, 130, 20)     # Золотис
 COLOR_ZONE_CASHIER: Final[tuple[int, int, int]] = (220, 120, 30)   # Сине-голубой
 COLOR_ZONE_CUSTOMER: Final[tuple[int, int, int]] = (30, 180, 220)  # Желто-оранжевый
 COLOR_ZONE_EXCLUSION: Final[tuple[int, int, int]] = (150, 100, 170) # Фиолетово-серый (Exclusion)
-COLOR_REFLECTION: Final[tuple[int, int, int]] = (130, 130, 130)    # Приглушенный серый (Отражение)
 
 CLASS_PERSON: Final[int] = 0
 CLASS_BOTTLE: Final[int] = 39
@@ -294,6 +299,7 @@ class VideoOverlayAnnotator:
         buffer_size: int = 5,
         min_contour_area: float = 500.0,
         zones: BankDeskZones | None = None,
+        use_vlm_judge: bool = True,
     ) -> None:
         self.yolo = YOLO(yolo_model)
         self.analyzer = TemporalMotionAnalyzer(
@@ -303,6 +309,8 @@ class VideoOverlayAnnotator:
         )
         self.zones = zones or BankDeskZones()
         self.sample_fps = sample_fps
+        self.use_vlm_judge = use_vlm_judge
+        self.vlm_judge = VLMComplianceJudge() if use_vlm_judge else None
 
     def render(self, input_video: str | Path, output_video: str | Path) -> Path:
         """Потоковая обработка с наложением зон и FSM-вердикта."""
@@ -364,6 +372,7 @@ class VideoOverlayAnnotator:
         current_motion_score = 0.0
         current_law = "Правила № 231 НБ РК"
 
+        vlm_checked = False
         frame_idx = 0
         render_start = time.perf_counter()
 
@@ -401,11 +410,6 @@ class VideoOverlayAnnotator:
                 # Детекция YOLOv8n
                 res_yolo = self.yolo(frame, classes=TRACKED_CLASSES, verbose=False)[0]
 
-                cashier_present = False
-                customer_count = 0
-                visitor_in_room_count = 0
-                forbidden_items: list[str] = []
-
                 # 1. Извлечение людей и спектрально-размерная классификация ролей
                 person_boxes = [
                     ([int(v) for v in b.xyxy[0].tolist()], float(b.conf[0]))
@@ -414,65 +418,18 @@ class VideoOverlayAnnotator:
                 ]
                 classified_people = filter_reflection_and_assign_roles(person_boxes, (height, width))
 
-                for p in classified_people:
-                    if p.role == "CASHIER":
-                        cashier_present = True
-                        current_boxes.append(
-                            DetectedBox(
-                                x_min=p.box[0],
-                                y_min=p.box[1],
-                                x_max=p.box[2],
-                                y_max=p.box[3],
-                                label=f"CASHIER: {p.confidence:.2f}",
-                                confidence=p.confidence,
-                                color=COLOR_PERSON,
-                                is_alert=False,
-                            )
-                        )
-                    elif p.role == "CUSTOMER":
-                        customer_count += 1
-                        current_boxes.append(
-                            DetectedBox(
-                                x_min=p.box[0],
-                                y_min=p.box[1],
-                                x_max=p.box[2],
-                                y_max=p.box[3],
-                                label=f"CUSTOMER: {p.confidence:.2f}",
-                                confidence=p.confidence,
-                                color=COLOR_PERSON,
-                                is_alert=False,
-                            )
-                        )
-                    elif p.role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM", "UNAUTHORIZED_ACCESS"):
-                        visitor_in_room_count += 1
-                        current_boxes.append(
-                            DetectedBox(
-                                x_min=p.box[0],
-                                y_min=p.box[1],
-                                x_max=p.box[2],
-                                y_max=p.box[3],
-                                label=f"[VISITOR/INCAS] {p.confidence:.2f}",
-                                confidence=p.confidence,
-                                color=COLOR_WARN_BG,
-                                is_alert=True,
-                            )
-                        )
-                    elif p.role in ("REFLECT_GLASS", "REFLECTION"):
-                        current_boxes.append(
-                            DetectedBox(
-                                x_min=p.box[0],
-                                y_min=p.box[1],
-                                x_max=p.box[2],
-                                y_max=p.box[3],
-                                label=f"[REFLECT: GLASS] {p.confidence:.2f}",
-                                confidence=p.confidence,
-                                color=COLOR_REFLECTION,
-                                is_alert=False,
-                            )
-                        )
+                cashier_present = any(p.role == "CASHIER" for p in classified_people)
+                customer_count = sum(1 for p in classified_people if p.role == "CUSTOMER")
+                visitor_in_room_count = sum(
+                    1
+                    for p in classified_people
+                    if p.role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM", "UNAUTHORIZED_ACCESS")
+                )
 
                 # 2. Детекция запрещенных предметов с фильтрацией стационарных приборов
                 cashier_box = next((p.box for p in classified_people if p.role == "CASHIER"), None)
+                forbidden_items: list[str] = []
+                forbidden_boxes: list[tuple[list[int], str, float]] = []
                 for b in res_yolo.boxes:
                     cls_id = int(b.cls[0])
                     conf = float(b.conf[0])
@@ -484,18 +441,39 @@ class VideoOverlayAnnotator:
                             continue  # пропускаем стационарное оборудование на столе
                         item_name = self.yolo.names[cls_id]
                         forbidden_items.append(item_name)
-                        current_boxes.append(
-                            DetectedBox(
-                                x_min=coords[0],
-                                y_min=coords[1],
-                                x_max=coords[2],
-                                y_max=coords[3],
-                                label=f"[!] {item_name.upper()}: {conf:.2f}",
-                                confidence=conf,
-                                color=COLOR_PHONE,
-                                is_alert=True,
-                            )
-                        )
+                        forbidden_boxes.append((coords, item_name, conf))
+
+                # VLM-проверка ID при активности в лотке передачи (п. 19 пп. 1)
+                if (
+                    self.vlm_judge
+                    and not vlm_checked
+                    and should_trigger_id_verification(
+                        cashier_present=cashier_present,
+                        customer_present=(customer_count > 0 or visitor_in_room_count > 0),
+                        tray_motion_score=current_motion_score,
+                        id_already_verified=vlm_checked,
+                    )
+                ):
+                    vlm_checked = True
+                    if (
+                        current_roi_bbox
+                        and current_roi_bbox.width > 10
+                        and current_roi_bbox.height > 10
+                    ):
+                        crop_img = frame[
+                            current_roi_bbox.y_min : current_roi_bbox.y_max,
+                            current_roi_bbox.x_min : current_roi_bbox.x_max,
+                        ]
+                    else:
+                        crop_img = frame
+                    _, buf = cv2.imencode(".jpg", crop_img)
+                    crop_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+                    vlm_verdict = self.vlm_judge.verify_id_presentation(
+                        crop_base64=crop_b64,
+                        timecode=timecode_sec,
+                    )
+                    if vlm_verdict.get("id_presented"):
+                        fsm.id_verified = True
 
                 # Оценка нормативным FSM
                 frame_input = FrameDetections(
@@ -507,6 +485,52 @@ class VideoOverlayAnnotator:
                     detected_objects=forbidden_items,
                 )
                 step_violations: list[ComplianceViolation] = fsm.evaluate_frame(frame_input)
+
+                # Контекст сессии для Dynamic State Promotion (повышение роли)
+                session_context = {
+                    "id_verified": fsm.id_verified,
+                    "operation_active": (
+                        (fsm.session_mode == SessionType.CUSTOMER_SESSION and fsm.id_verified)
+                        or (fsm.session_mode == SessionType.INTERNAL_OPERATION)
+                    ),
+                    "tray_active": current_motion_score > 3000.0,
+                    "customer_count": customer_count + visitor_in_room_count,
+                    "pending": timecode_sec < 4.0 and not fsm.id_verified,
+                }
+
+                # Dynamic State Promotion: формирование Bounding Boxes людей
+                for p in classified_people:
+                    disp_label, disp_color = get_person_display_attributes(
+                        p.role, session_context, confidence=p.confidence
+                    )
+                    is_alert = (disp_color == COLOR_VIOLATION)
+                    current_boxes.append(
+                        DetectedBox(
+                            x_min=p.box[0],
+                            y_min=p.box[1],
+                            x_max=p.box[2],
+                            y_max=p.box[3],
+                            label=disp_label,
+                            confidence=p.confidence,
+                            color=disp_color,
+                            is_alert=is_alert,
+                        )
+                    )
+
+                # Bounding Boxes запрещенных предметов
+                for coords, item_name, conf in forbidden_boxes:
+                    current_boxes.append(
+                        DetectedBox(
+                            x_min=coords[0],
+                            y_min=coords[1],
+                            x_max=coords[2],
+                            y_max=coords[3],
+                            label=f"[!] {item_name.upper()}: {conf:.2f}",
+                            confidence=conf,
+                            color=COLOR_PHONE,
+                            is_alert=True,
+                        )
+                    )
 
                 if step_violations:
                     top_v = step_violations[0]
@@ -529,7 +553,12 @@ class VideoOverlayAnnotator:
                     if fsm.session_mode == SessionType.INTERNAL_OPERATION:
                         current_fsm_state = "INTERNAL_MODE"
                         current_verdict = "💼 РЕВИЗИЯ / КЛИЕНТА НЕТ (НОРМА)"
-                        current_badge_bg = COLOR_PERSON
+                        current_badge_bg = COLOR_CLIENT_VERIFIED
+                        current_law = "Постановление № 231 НБ РК"
+                    elif fsm.id_verified:
+                        current_fsm_state = "COMPLIANT_VERIFIED"
+                        current_verdict = "✅ ПРАВИЛА СОБЛЮДЕНЫ (ID VERIFIED)"
+                        current_badge_bg = COLOR_CLIENT_VERIFIED
                         current_law = "Постановление № 231 НБ РК"
                     else:
                         current_fsm_state = "COMPLIANT"

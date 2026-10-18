@@ -1,6 +1,11 @@
 """Реэкспорт модуля compliance_fsm."""
 
 from app.features.ai.compliance_fsm import (
+    COLOR_CASHIER,
+    COLOR_CLIENT_VERIFIED,
+    COLOR_PENDING,
+    COLOR_REFLECTION,
+    COLOR_VIOLATION,
     COUNTING_MACHINE_RECT,
     LAW_UNAUTHORIZED_ACCESS_ROOM,
     AdaptiveCashierTopology,
@@ -14,12 +19,18 @@ from app.features.ai.compliance_fsm import (
     VLMComplianceJudge,
     classify_person_strict,
     filter_reflection_and_assign_roles,
+    get_person_display_attributes,
     is_machine_counting,
     is_real_phone_violation,
     should_trigger_id_verification,
 )
 
 __all__ = [
+    "COLOR_CASHIER",
+    "COLOR_CLIENT_VERIFIED",
+    "COLOR_PENDING",
+    "COLOR_VIOLATION",
+    "COLOR_REFLECTION",
     "AdaptiveCashierTopology",
     "BankComplianceFSM",
     "BankDeskZones",
@@ -33,6 +44,7 @@ __all__ = [
     "VLMComplianceJudge",
     "classify_person_strict",
     "filter_reflection_and_assign_roles",
+    "get_person_display_attributes",
     "is_machine_counting",
     "is_real_phone_violation",
     "should_trigger_id_verification",

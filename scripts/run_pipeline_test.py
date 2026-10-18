@@ -9,9 +9,9 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 # Автоматическое добавление backend в sys.path
@@ -20,7 +20,7 @@ BACKEND_DIR = PROJECT_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.features.ai.motion_extractor import TemporalMotionAnalyzer  # noqa: E402
+from app.features.ai.motion_extractor import TemporalMotionAnalyzer
 
 
 def save_segment_images(
@@ -134,7 +134,7 @@ def process_videos(
             vid_elapsed = time.perf_counter() - vid_start
 
             # Сохранение кропов в папку data/processed_segments/<video_name>
-            meta = save_segment_images(vid.stem, segments, output_dir)
+            save_segment_images(vid.stem, segments, output_dir)
 
             print(
                 f"OK ({vid_elapsed:.2f}c) | активных сегментов для VLM: {len(segments)}"
@@ -148,7 +148,7 @@ def process_videos(
                     "active_segments": len(segments),
                 }
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             vid_elapsed = time.perf_counter() - vid_start
             print(f"ОШИБКА ({vid_elapsed:.2f}c): {exc}")
             summary.append(

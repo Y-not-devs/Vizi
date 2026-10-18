@@ -1,6 +1,11 @@
 """Тесты нормативного сценарного автомата BankComplianceFSM (Правила № 231 НБ РК)."""
 
 from app.features.ai.compliance_fsm import (
+    COLOR_CASHIER,
+    COLOR_CLIENT_VERIFIED,
+    COLOR_PENDING,
+    COLOR_REFLECTION,
+    COLOR_VIOLATION,
     LAW_UNAUTHORIZED_ACCESS_ROOM,
     AdaptiveCashierTopology,
     BankComplianceFSM,
@@ -10,6 +15,7 @@ from app.features.ai.compliance_fsm import (
     VLMComplianceJudge,
     classify_person_strict,
     filter_reflection_and_assign_roles,
+    get_person_display_attributes,
     is_machine_counting,
     is_real_phone_violation,
     should_trigger_id_verification,
@@ -409,5 +415,79 @@ def test_adaptive_cashier_topology() -> None:
     standing_cashier_box = ([158, 229, 237, 395], 0.80)  # cx ~ 0.43, bottom_y = 0.466
     classified_standing = topo.classify_people([standing_cashier_box], frame_shape)
     assert classified_standing[0]["role"] == "CASHIER"
+
+
+def test_dynamic_state_promotion() -> None:
+    """Проверка архитектурного правила Dynamic State Promotion (повышение роли)."""
+    # 1. Кассир
+    label_cashier, color_cashier = get_person_display_attributes("CASHIER", {})
+    assert label_cashier == "[CASHIER]"
+    assert color_cashier == COLOR_CASHIER
+
+    # 2. Отражение на стекле
+    label_refl, color_refl = get_person_display_attributes("REFLECT_GLASS", {})
+    assert label_refl == "[REFLECT: GLASS]"
+    assert color_refl == COLOR_REFLECTION
+
+    # 3. Фаза 1 (Секунды 0–3): Человек только подошел или зашел сбоку -> [PENDING: VISITOR]
+    pending_ctx = {
+        "id_verified": False,
+        "operation_active": False,
+        "tray_active": False,
+        "customer_count": 1,
+        "pending": True,
+    }
+    label_p1, color_p1 = get_person_display_attributes("CUSTOMER", pending_ctx)
+    assert label_p1 == "[PENDING: VISITOR]"
+    assert color_p1 == COLOR_PENDING
+
+    label_door_pending, color_door_p = get_person_display_attributes(
+        "VISITOR_IN_CASH_ROOM", pending_ctx
+    )
+    assert label_door_pending == "[PENDING: VISITOR]"
+    assert color_door_p == COLOR_PENDING
+
+    # 4. Фаза 2: Кассир и клиент у лотка -> [CLIENT: IDENTIFYING...] (желтый/янтарный)
+    tray_ident_ctx = {
+        "id_verified": False,
+        "operation_active": False,
+        "tray_active": True,
+        "customer_count": 1,
+    }
+    label_p2, color_p2 = get_person_display_attributes("CUSTOMER", tray_ident_ctx)
+    assert label_p2 == "[CLIENT: IDENTIFYING...]"
+    assert color_p2 == COLOR_PENDING
+
+    # 5. Фаза 3: VLM верифицировал ID -> мгновенный переход в [CLIENT: VERIFIED] (зеленый)
+    verified_ctx = {
+        "id_verified": True,
+        "operation_active": True,
+        "tray_active": False,
+        "customer_count": 1,
+    }
+    label_p3, color_p3 = get_person_display_attributes("CUSTOMER", verified_ctx)
+    assert label_p3 == "[CLIENT: VERIFIED]"
+    assert color_p3 == COLOR_CLIENT_VERIFIED
+
+    # Инкассатор / посетитель контура при открытой служебной сессии также авторизован
+    label_incas_verified, color_incas_v = get_person_display_attributes(
+        "VISITOR_IN_CASH_ROOM", verified_ctx
+    )
+    assert label_incas_verified == "[CLIENT: VERIFIED]"
+    assert color_incas_v == COLOR_CLIENT_VERIFIED
+
+    # 6. Нарушение п. 14: второй клиент при уже активном первом -> красный [!] UNAUTHORIZED PERSON
+    violation_two_clients_ctx = {
+        "id_verified": True,
+        "operation_active": True,
+        "customer_count": 2,
+    }
+    label_viol, color_viol = get_person_display_attributes("CUSTOMER", violation_two_clients_ctx)
+    assert label_viol == "[!] UNAUTHORIZED PERSON"
+    assert color_viol == COLOR_VIOLATION
+
+    # 7. Форматирование метки с confidence
+    label_conf, _ = get_person_display_attributes("CASHIER", {}, confidence=0.94)
+    assert label_conf == "[CASHIER] 0.94"
 
 

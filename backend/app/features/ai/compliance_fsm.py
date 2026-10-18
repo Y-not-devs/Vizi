@@ -20,7 +20,15 @@ from typing import Any, Final
 import httpx
 import numpy as np
 
-from app.features.ai.adaptive_topology import AdaptiveCashierTopology
+from app.features.ai.adaptive_topology import (
+    COLOR_CASHIER,
+    COLOR_CLIENT_VERIFIED,
+    COLOR_PENDING,
+    COLOR_REFLECTION,
+    COLOR_VIOLATION,
+    AdaptiveCashierTopology,
+    get_person_display_attributes,
+)
 
 try:
     from app.core.config import get_settings
@@ -604,3 +612,36 @@ class VLMComplianceJudge:
                 "confidence": 0.85,
                 "details": "Нормативный VLM-контроль: документ идентифицирован в лотке передачи",
             }
+
+
+__all__ = [
+    "COLOR_CASHIER",
+    "COLOR_CLIENT_VERIFIED",
+    "COLOR_PENDING",
+    "COLOR_VIOLATION",
+    "COLOR_REFLECTION",
+    "COUNTING_MACHINE_RECT",
+    "FORBIDDEN_COCO_OBJECTS",
+    "LAW_CASHIER_ABSENT",
+    "LAW_COUNTING_WITHOUT_CLIENT",
+    "LAW_ID_CHECK",
+    "LAW_PROHIBITED_ITEMS",
+    "LAW_UNAUTHORIZED_ACCESS",
+    "LAW_UNAUTHORIZED_ACCESS_ROOM",
+    "AdaptiveCashierTopology",
+    "BankComplianceFSM",
+    "BankDeskZones",
+    "ComplianceViolation",
+    "FrameDetections",
+    "NormalizedZone",
+    "PersonDetection",
+    "SessionType",
+    "VLMComplianceJudge",
+    "classify_person_strict",
+    "filter_reflection_and_assign_roles",
+    "get_person_display_attributes",
+    "is_machine_counting",
+    "is_real_phone_violation",
+    "should_trigger_id_verification",
+]
+

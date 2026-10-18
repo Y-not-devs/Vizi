@@ -10,9 +10,71 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
+
+# Цветовая схема Bounding Box в BGR:
+COLOR_CASHIER: Final[tuple[int, int, int]] = (0, 220, 0)            # Зеленый
+COLOR_CLIENT_VERIFIED: Final[tuple[int, int, int]] = (0, 200, 100)   # Изумрудный / Зеленый
+COLOR_PENDING: Final[tuple[int, int, int]] = (0, 215, 255)           # Желтый / Оранжевый
+COLOR_VIOLATION: Final[tuple[int, int, int]] = (0, 0, 255)           # Красный (нарушение)
+COLOR_REFLECTION: Final[tuple[int, int, int]] = (130, 130, 130)      # Приглушенный серый
+
+
+def get_person_display_attributes(
+    role: str,
+    session_context: dict[str, Any],
+    confidence: float | None = None,
+) -> tuple[str, tuple[int, int, int]]:
+    """Возвращает текст метки и цвет рамки (Dynamic State Promotion).
+
+    Архитектурное правило Dynamic State Promotion:
+    1. Секунда 0–3: Человек только подошел -> [PENDING: VISITOR] (желтый/янтарный).
+    2. Взаимодействие в лотке: [CLIENT: IDENTIFYING...] (желтый/янтарный).
+    3. Секунда 4+: Документы верифицированы VLM -> [CLIENT: VERIFIED] (зеленый).
+    4. Красный цвет остается только для реальных нарушений:
+       - customer_count > 1 (второй клиент при уже обслуживаемом клиенте, п. 14).
+       - активное неразрешенное нарушение.
+    """
+    is_id_verified = session_context.get("id_verified", False)
+    is_operation_active = session_context.get("operation_active", False)
+
+    if role == "CASHIER":
+        label, color = "[CASHIER]", COLOR_CASHIER
+    elif role in (
+        "CUSTOMER",
+        "VISITOR_IN_CASH_ROOM",
+        "UNAUTHORIZED_ACCESS",
+        "UNAUTHORIZED_IN_CASH_ROOM",
+    ):
+        # Если человек действительно чужой (например, второй клиент при первом активном):
+        if session_context.get("customer_count", 0) > 1:
+            label, color = "[!] UNAUTHORIZED PERSON", COLOR_VIOLATION
+        # Если документы проверены ИЛИ сессия обслуживания штатно открыта:
+        elif is_id_verified or is_operation_active:
+            label, color = "[CLIENT: VERIFIED]", COLOR_CLIENT_VERIFIED
+        # Если операция еще не подтверждена, но идет взаимодействие:
+        elif session_context.get("tray_active", False):
+            label, color = "[CLIENT: IDENTIFYING...]", COLOR_PENDING
+        # Человек только подошел или зашел сбоку до верификации
+        elif (
+            role in ("VISITOR_IN_CASH_ROOM", "UNAUTHORIZED_IN_CASH_ROOM")
+            or session_context.get("pending", False)
+        ):
+            label, color = "[PENDING: VISITOR]", COLOR_PENDING
+        # Дефолтный статус посетителя у стойки до начала операции
+        else:
+            label, color = "[CLIENT]", COLOR_CLIENT_VERIFIED
+    elif role in ("REFLECT_GLASS", "REFLECTION"):
+        label, color = "[REFLECT: GLASS]", COLOR_REFLECTION
+    else:
+        label, color = "[UNKNOWN]", (180, 180, 180)
+
+    if confidence is not None:
+        label = f"{label} {confidence:.2f}"
+
+    return label, color
 
 
 class AdaptiveCashierTopology:
@@ -213,3 +275,14 @@ class AdaptiveCashierTopology:
                 })
 
         return classified
+
+
+__all__ = [
+    "COLOR_CASHIER",
+    "COLOR_CLIENT_VERIFIED",
+    "COLOR_PENDING",
+    "COLOR_VIOLATION",
+    "COLOR_REFLECTION",
+    "AdaptiveCashierTopology",
+    "get_person_display_attributes",
+]
